@@ -1,155 +1,90 @@
+
 "use client";
 
+import { useState, type FormEvent } from "react";
+import { useRouter } from "next/navigation";
+import { useAuth } from "./AuthProvider";
 
-import {
-useRouter
-} from "next/navigation";
+export default function LoginForm() {
+  const { login } = useAuth();
+  const router = useRouter();
 
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
-import {
-useAuth
-} from "./AuthProvider";
+  async function handleLogin(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
 
+    setLoading(true);
+    setError("");
 
+    try {
+      await login(email, password);
 
-export default function LoginForm(){
+      router.push("/dashboard");
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Unable to log in. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
 
+  return (
+    <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/5 p-10 backdrop-blur-xl">
 
-const {
-login
+      <h1 className="text-3xl font-bold text-white">
+        Investigator Login
+      </h1>
 
-}=useAuth();
+      <p className="mt-3 text-slate-400">
+        Access NeuralEdge AI forensic workspace
+      </p>
 
+      <form onSubmit={handleLogin}>
 
-const router=useRouter();
+        <input
+          type="email"
+          placeholder="Email"
+          aria-label="Email"
+          autoComplete="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          className="mt-8 w-full rounded-xl border border-white/10 bg-black/20 p-4 text-white"
+        />
 
+        <input
+          type="password"
+          placeholder="Password"
+          aria-label="Password"
+          autoComplete="current-password"
+          required
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="mt-4 w-full rounded-xl border border-white/10 bg-black/20 p-4 text-white"
+        />
 
+        {error && (
+          <p role="alert" className="mt-4 text-sm text-red-400">
+            {error}
+          </p>
+        )}
 
-function handleLogin(){
+        <button
+          type="submit"
+          disabled={loading}
+          className="mt-8 w-full rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 py-4 font-semibold text-white disabled:opacity-50"
+        >
+          {loading ? "Logging in..." : "Login"}
+        </button>
 
-login();
-
-router.push("/dashboard");
-
-}
-
-
-
-return (
-
-<div
-
-className="
-w-full
-max-w-md
-rounded-3xl
-border
-border-white/10
-bg-white/5
-backdrop-blur-xl
-p-10
-"
-
->
-
-
-<h1
-
-className="
-text-3xl
-font-bold
-text-white
-"
-
->
-
-Investigator Login
-
-</h1>
-
-
-
-<p
-
-className="
-text-slate-400
-mt-3
-"
-
->
-
-Access NeuralEdge AI forensic workspace
-
-</p>
-
-
-
-
-<input
-
-placeholder="Email"
-
-className="
-mt-8
-w-full
-rounded-xl
-bg-black/20
-border
-border-white/10
-p-4
-text-white
-"
-
-/>
-
-
-
-<input
-
-placeholder="Password"
-
-type="password"
-
-className="
-mt-4
-w-full
-rounded-xl
-bg-black/20
-border
-border-white/10
-p-4
-text-white
-"
-
-/>
-
-
-
-<button
-
-onClick={handleLogin}
-
-className="
-mt-8
-w-full
-rounded-xl
-bg-gradient-to-r
-from-cyan-500
-to-blue-600
-py-4
-font-semibold
-"
-
->
-
-Login
-
-</button>
-
-
-
-</div>
-
-)
-
+      </form>
+    </div>
+  );
 }

@@ -1,137 +1,71 @@
+
 "use client";
 
-
 import {
-createContext,
-useContext,
-useState
+  createContext,
+  useContext,
+  useState,
+  type ReactNode,
 } from "react";
 
-
-type User = {
-
-name:string;
-
-role:"guest" | "investigator";
-
-} | null;
-
-
+import {
+  loginUser,
+  type Investigator,
+} from "@/services/api";
 
 type AuthContextType = {
-
-user: User;
-
-login:()=>void;
-
-logout:()=>void;
-
+  user: Investigator | null;
+  token: string | null;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => void;
 };
 
-
-
 const AuthContext = createContext<AuthContextType | undefined>(
-undefined
+  undefined
 );
-
-
 
 export function AuthProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const [user, setUser] = useState<Investigator | null>(null);
+  const [token, setToken] = useState<string | null>(null);
 
-children
+  async function login(email: string, password: string) {
+    const result = await loginUser(email, password);
 
-}:{
+    setUser(result.user);
+    setToken(result.access_token);
+  }
 
-children:React.ReactNode;
+  function logout() {
+    setUser(null);
+    setToken(null);
+  }
 
-}){
-
-
-const [user,setUser]=useState<User>({
-
-name:"Guest",
-
-role:"guest"
-
-});
-
-
-
-function login(){
-
-setUser({
-
-name:"Investigator",
-
-role:"investigator"
-
-});
-
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        token,
+        login,
+        logout,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
 }
 
+export function useAuth() {
+  const context = useContext(AuthContext);
 
+  if (!context) {
+    throw new Error(
+      "useAuth must be used inside AuthProvider"
+    );
+  }
 
-function logout(){
-
-setUser({
-
-name:"Guest",
-
-role:"guest"
-
-});
-
-}
-
-
-
-return (
-
-<AuthContext.Provider
-
-value={{
-
-user,
-
-login,
-
-logout
-
-}}
-
->
-
-
-{children}
-
-
-</AuthContext.Provider>
-
-)
-
-}
-
-
-
-
-
-export function useAuth(){
-
-
-const context = useContext(AuthContext);
-
-
-
-if(!context){
-
-throw new Error(
-"useAuth must be used inside AuthProvider"
-);
-
-}
-
-
-return context;
-
-
+  return context;
 }
