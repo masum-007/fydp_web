@@ -1,6 +1,7 @@
 
 "use client";
 
+import CaseManager from "@/components/CaseManager";
 import { useCallback, useEffect, useState } from "react";
 
 import Sidebar from "@/components/Sidebar";
@@ -105,7 +106,9 @@ export default function CasesPage() {
           {loading ? "Loading..." : "Refresh"}
         </button>
       </div>
-
+ <div className="mt-10">
+      <CaseManager />
+    </div>
       {loading && (
         <p role="status" className="mt-10 text-cyan-400">
           Loading investigation history...

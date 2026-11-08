@@ -20,7 +20,17 @@ from pwdlib import PasswordHash
 from .config import Settings
 from .database import connection, initialize
 from .images import inspect_image
-from .schemas import Register, Login, User, Token, Evidence, AnalyzeRequest
+from .schemas import (
+    Register,
+    Login,
+    User,
+    Token,
+    Evidence,
+    AnalyzeRequest,
+    CaseCreate,
+    CaseAnalysisAdd,
+    CaseStatusUpdate,
+)
 from .inference import InferenceEngine
 from .report_service import generate_forensic_report
 
@@ -49,7 +59,7 @@ def create_app(settings: Settings | None = None, engine=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.origins),
-        allow_methods=["GET", "POST"],
+        allow_methods=['GET', 'POST', 'PATCH'],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -467,5 +477,209 @@ def create_app(settings: Settings | None = None, engine=None):
                 "X-Content-Type-Options": "nosniff",
             },
         )
+    
+    # ---------------------------------------------------
+    # FORENSIC CASE MANAGEMENT
+    # ---------------------------------------------------
+
+    @app.post("/api/cases", status_code=201)
+    def create_case(
+        body: CaseCreate,
+        user: User = Depends(current_user),
+    ):
+        title = body.title.strip()
+        if len(title) < 3:
+            raise HTTPException(422, "Case title is too short.")
+
+        case_id = str(uuid4())
+        created_at = now()
+
+        with connection(settings) as db:
+            db.execute(
+                """
+                INSERT INTO cases
+                (id, user_id, title, description, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    case_id,
+                    user.id,
+                    title,
+                    body.description.strip(),
+                    "open",
+                    created_at,
+                ),
+            )
+
+        return {
+            "id": case_id,
+            "title": title,
+            "description": body.description.strip(),
+            "status": "open",
+            "created_at": created_at,
+            "analysis_count": 0,
+        }
+
+
+    @app.get("/api/cases")
+    def list_cases(user: User = Depends(current_user)):
+        with connection(settings) as db:
+            rows = db.execute(
+                """
+                SELECT
+                    c.id,
+                    c.title,
+                    c.description,
+                    c.status,
+                    c.created_at,
+                    COUNT(ca.analysis_id) AS analysis_count
+                FROM cases c
+                LEFT JOIN case_analyses ca
+                    ON ca.case_id = c.id
+                WHERE c.user_id = ?
+                GROUP BY c.id
+                ORDER BY c.created_at DESC, c.id DESC
+                """,
+                (user.id,),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
+
+    @app.get("/api/cases/{case_id}")
+    def get_case(
+        case_id: str,
+        user: User = Depends(current_user),
+    ):
+        with connection(settings) as db:
+            case = db.execute(
+                """
+                SELECT id, title, description, status, created_at
+                FROM cases
+                WHERE id = ? AND user_id = ?
+                """,
+                (case_id, user.id),
+            ).fetchone()
+
+            if not case:
+                raise HTTPException(404, "Case not found.")
+
+            rows = db.execute(
+                """
+                SELECT a.result_json
+                FROM case_analyses ca
+                JOIN analyses a ON a.id = ca.analysis_id
+                WHERE ca.case_id = ? AND a.user_id = ?
+                ORDER BY ca.created_at DESC
+                """,
+                (case_id, user.id),
+            ).fetchall()
+
+        return {
+            **dict(case),
+            "analyses": [
+                json.loads(row["result_json"])
+                for row in rows
+            ],
+        }
+
+
+    @app.post(
+        "/api/cases/{case_id}/analyses",
+        status_code=201,
+    )
+    def add_analysis_to_case(
+        case_id: str,
+        body: CaseAnalysisAdd,
+        user: User = Depends(current_user),
+    ):
+        with connection(settings) as db:
+            case = db.execute(
+                """
+                SELECT id, status
+                FROM cases
+                WHERE id = ? AND user_id = ?
+                """,
+                (case_id, user.id),
+            ).fetchone()
+
+            if not case:
+                raise HTTPException(404, "Case not found.")
+
+            if case["status"] != "open":
+                raise HTTPException(
+                    409,
+                    "Cannot modify a closed case.",
+                )
+
+            analysis = db.execute(
+                """
+                SELECT id
+                FROM analyses
+                WHERE id = ? AND user_id = ?
+                """,
+                (body.analysis_id, user.id),
+            ).fetchone()
+
+            if not analysis:
+                raise HTTPException(
+                    404,
+                    "Analysis not found.",
+                )
+
+            existing = db.execute(
+                """
+                SELECT 1
+                FROM case_analyses
+                WHERE case_id = ? AND analysis_id = ?
+                """,
+                (case_id, body.analysis_id),
+            ).fetchone()
+
+            if existing:
+                raise HTTPException(
+                    409,
+                    "Analysis already belongs to this case.",
+                )
+
+            db.execute(
+                """
+                INSERT INTO case_analyses
+                (case_id, analysis_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (case_id, body.analysis_id, now()),
+            )
+
+        return {
+            "case_id": case_id,
+            "analysis_id": body.analysis_id,
+            "status": "added",
+        }
+
+
+    @app.patch("/api/cases/{case_id}/status")
+    def update_case_status(
+        case_id: str,
+        body: CaseStatusUpdate,
+        user: User = Depends(current_user),
+    ):
+        with connection(settings) as db:
+            cursor = db.execute(
+                """
+                UPDATE cases
+                SET status = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (body.status, case_id, user.id),
+            )
+
+            if cursor.rowcount == 0:
+                raise HTTPException(404, "Case not found.")
+
+        return {
+            "id": case_id,
+            "status": body.status,
+        }
 
     return app

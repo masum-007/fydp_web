@@ -246,3 +246,118 @@ export async function downloadForensicReport(
     URL.revokeObjectURL(url);
   }, 1000);
 }
+
+export type InvestigationCase = {
+  id: string;
+  title: string;
+  description: string;
+  status: "open" | "closed";
+  created_at: string;
+  analysis_count: number;
+};
+
+export async function getCases(
+  token: string
+): Promise<InvestigationCase[]> {
+  const response = await authenticatedFetch(
+    "/api/cases",
+    token
+  );
+
+  await checkResponse(response);
+
+  return (await response.json()) as InvestigationCase[];
+}
+
+export async function createCase(
+  token: string,
+  title: string,
+  description: string
+): Promise<InvestigationCase> {
+  const response = await authenticatedFetch(
+    "/api/cases",
+    token,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        title,
+        description,
+      }),
+    }
+  );
+
+  await checkResponse(response);
+
+  return (await response.json()) as InvestigationCase;
+}
+
+export type CaseDetails = {
+  id: string;
+  title: string;
+  description: string;
+  status: "open" | "closed";
+  created_at: string;
+  analyses: AnalysisResponse[];
+};
+
+// Fetch one case and all analyses attached to it.
+export async function getCaseDetails(
+  token: string,
+  caseId: string
+): Promise<CaseDetails> {
+  const response = await authenticatedFetch(
+    `/api/cases/${encodeURIComponent(caseId)}`,
+    token
+  );
+
+  await checkResponse(response);
+
+  return (await response.json()) as CaseDetails;
+}
+
+// Attach an existing analysis to an open case.
+export async function attachAnalysisToCase(
+  token: string,
+  caseId: string,
+  analysisId: string
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/cases/${encodeURIComponent(caseId)}/analyses`,
+    token,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        analysis_id: analysisId,
+      }),
+    }
+  );
+
+  await checkResponse(response);
+}
+
+// Open or close a case.
+export async function updateCaseStatus(
+  token: string,
+  caseId: string,
+  status: "open" | "closed"
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/cases/${encodeURIComponent(caseId)}/status`,
+    token,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status }),
+    }
+  );
+
+  await checkResponse(response);
+}
