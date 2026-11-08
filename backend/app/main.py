@@ -5,13 +5,17 @@ import json
 import logging
 import shutil
 import io
+import os
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import time
+from threading import Lock, BoundedSemaphore
+
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -46,6 +50,13 @@ def create_app(settings: Settings | None = None, engine=None):
     dummy_hash = passwords.hash("unused-timing-comparison-password")
     bearer = HTTPBearer(auto_error=False)
 
+    # Guest inference is opt-in. Enable only for a controlled local demo.
+    # Public deployment needs edge rate limiting and additional anti-abuse measures.
+    guest_enabled = os.getenv("GUEST_DETECTION_ENABLED", "false").lower() == "true"
+    guest_requests: dict[str, list[float]] = {}
+    guest_lock = Lock()
+    guest_slot = BoundedSemaphore(1)
+
     @asynccontextmanager
     async def lifespan(app):
         initialize(settings)
@@ -59,7 +70,7 @@ def create_app(settings: Settings | None = None, engine=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.origins),
-        allow_methods=['GET', 'POST', 'PATCH'],
+        allow_methods=["GET", "POST", "PATCH"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -477,7 +488,7 @@ def create_app(settings: Settings | None = None, engine=None):
                 "X-Content-Type-Options": "nosniff",
             },
         )
-    
+
     # ---------------------------------------------------
     # FORENSIC CASE MANAGEMENT
     # ---------------------------------------------------
@@ -520,7 +531,6 @@ def create_app(settings: Settings | None = None, engine=None):
             "analysis_count": 0,
         }
 
-
     @app.get("/api/cases")
     def list_cases(user: User = Depends(current_user)):
         with connection(settings) as db:
@@ -544,7 +554,6 @@ def create_app(settings: Settings | None = None, engine=None):
             ).fetchall()
 
         return [dict(row) for row in rows]
-
 
     @app.get("/api/cases/{case_id}")
     def get_case(
@@ -577,12 +586,8 @@ def create_app(settings: Settings | None = None, engine=None):
 
         return {
             **dict(case),
-            "analyses": [
-                json.loads(row["result_json"])
-                for row in rows
-            ],
+            "analyses": [json.loads(row["result_json"]) for row in rows],
         }
-
 
     @app.post(
         "/api/cases/{case_id}/analyses",
@@ -657,7 +662,6 @@ def create_app(settings: Settings | None = None, engine=None):
             "status": "added",
         }
 
-
     @app.patch("/api/cases/{case_id}/status")
     def update_case_status(
         case_id: str,
@@ -680,6 +684,66 @@ def create_app(settings: Settings | None = None, engine=None):
         return {
             "id": case_id,
             "status": body.status,
+        }
+
+    @app.post("/api/quick-detect")
+    def quick_detect(request: Request, file: UploadFile = File(...)):
+        """Opt-in guest demo: no saved evidence, analyses, or explanation assets."""
+        if not guest_enabled:
+            raise HTTPException(404, "Guest detection is disabled.")
+
+        # A lightweight, in-process limiter for a single-worker local demo.
+        # Do not trust X-Forwarded-For from untrusted clients.
+        client_ip = request.client.host if request.client else "unknown"
+        moment = time.monotonic()
+        with guest_lock:
+            for ip in list(guest_requests):
+                recent = [t for t in guest_requests[ip] if moment - t < 3600]
+                if recent:
+                    guest_requests[ip] = recent
+                else:
+                    del guest_requests[ip]
+            attempts = guest_requests.setdefault(client_ip, [])
+            if len(attempts) >= 3:
+                raise HTTPException(429, "Guest limit reached. Try again later.")
+            attempts.append(moment)
+
+        if not engine.ready:
+            raise HTTPException(503, "AI model is currently unavailable.")
+
+        # Read at most one byte beyond the guest size limit.
+        max_bytes = 10 * 1024 * 1024
+        try:
+            data = file.file.read(max_bytes + 1)
+        finally:
+            file.file.close()
+        if len(data) > max_bytes:
+            raise HTTPException(413, "Guest images must be 10 MB or smaller.")
+
+        width, height, media_type = inspect_image(data)
+        if media_type not in {"image/jpeg", "image/png"}:
+            raise HTTPException(415, "Only JPEG and PNG images are supported.")
+        if width * height > 8_000_000:
+            raise HTTPException(413, "Guest image dimensions are too large.")
+
+        if not guest_slot.acquire(blocking=False):
+            raise HTTPException(503, "Guest detection is busy. Please retry.")
+        try:
+            prediction, _assets = engine.predict(data)
+        except Exception:
+            logging.getLogger(__name__).exception("Guest inference failed")
+            raise HTTPException(503, "Unable to analyze this image.")
+        finally:
+            guest_slot.release()
+
+        return {
+            "prediction": prediction["prediction"],
+            "confidence": prediction["confidence"],
+            "fake_probability": prediction["fake_probability"],
+            "real_probability": prediction["real_probability"],
+            "threshold": prediction["threshold"],
+            "model": prediction["model"],
+            "note": "AI screening result, not proof of authenticity or manipulation.",
         }
 
     return app
