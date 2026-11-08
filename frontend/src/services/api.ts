@@ -198,3 +198,19 @@ export async function getAnalysisImage(
 
   return URL.createObjectURL(blob);
 }
+
+
+export async function getAnalysisHistory(
+  token: string,
+  limit = 50,
+  offset = 0
+): Promise<AnalysisResponse[]> {
+  const response = await authenticatedFetch(
+    `/api/analyses?limit=${limit}&offset=${offset}`,
+    token
+  );
+
+  await checkResponse(response);
+
+  return (await response.json()) as AnalysisResponse[];
+}
