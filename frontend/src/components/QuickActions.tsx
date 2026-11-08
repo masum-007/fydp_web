@@ -27,9 +27,9 @@ link:"/reports"
 },
 
 {
-name:"Manage Cases",
-icon:<FolderOpen/>,
-link:"#"
+  name: "Manage Cases",
+  icon: <FolderOpen />,
+  link: "/cases"
 }
 
 ];

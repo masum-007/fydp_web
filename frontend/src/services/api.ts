@@ -214,3 +214,35 @@ export async function getAnalysisHistory(
 
   return (await response.json()) as AnalysisResponse[];
 }
+
+export async function downloadForensicReport(
+  analysisId: string,
+  token: string
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/report/${encodeURIComponent(analysisId)}`,
+    token
+  );
+
+  await checkResponse(response);
+
+  const blob = await response.blob();
+
+  if (!blob.type.includes("application/pdf")) {
+    throw new Error("Server did not return a PDF report.");
+  }
+
+  const url = URL.createObjectURL(blob);
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `NeuralEdge_${analysisId}.pdf`;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  window.setTimeout(() => {
+    URL.revokeObjectURL(url);
+  }, 1000);
+}
