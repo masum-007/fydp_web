@@ -361,3 +361,50 @@ export async function updateCaseStatus(
 
   await checkResponse(response);
 }
+
+export type RegisterResponse = {
+  id: string;
+  name: string;
+  email: string;
+  role: "investigator";
+};
+
+export async function registerInvestigator(
+  name: string,
+  email: string,
+  password: string
+): Promise<RegisterResponse> {
+  const response = await fetch(
+    `${API_URL}/api/auth/register`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name,
+        email,
+        password,
+      }),
+      cache: "no-store",
+    }
+  );
+
+  if (!response.ok) {
+    if (response.status === 409) {
+      throw new Error(
+        "This email address is already registered."
+      );
+    }
+
+    const data = await response.json().catch(() => null);
+
+    throw new Error(
+      typeof data?.detail === "string"
+        ? data.detail
+        : "Registration failed. Check your information."
+    );
+  }
+
+  return (await response.json()) as RegisterResponse;
+}

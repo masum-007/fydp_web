@@ -1,6 +1,7 @@
 
 "use client";
 
+import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "./AuthProvider";
@@ -85,6 +86,12 @@ export default function LoginForm() {
         </button>
 
       </form>
+      <p className="mt-6 text-center text-sm text-slate-400">
+Don&apos;t have an investigator account?{" "}
+  <Link href="/register" className="text-cyan-400 hover:underline">
+    Register here
+  </Link>
+</p>
     </div>
   );
 }
