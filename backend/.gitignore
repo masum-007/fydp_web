@@ -1,7 +1,26 @@
-.venv/
+# Python environments
+/.venv/
+/.venv-v2/
+/.venv-legacy/
+
+# Environment configuration
 .env
-storage/
+.env.*
+
+# Model artifacts
+/artifacts/
+/artifacts_v2/
+
+# Evidence and database
+/storage/
+
+# Local MediaPipe assets
+/assets/face_landmarker.task
+
+# Generated smoke-test output
+/v2-smoke-results/
+
+# Python generated files
 __pycache__/
 .pytest_cache/
-*.pyc
-/artifacts/
+*.pyc 

@@ -4,6 +4,7 @@
 import { useEffect, useState } from "react";
 
 import Sidebar from "@/components/Sidebar";
+import AdditionalExplainability from "@/components/AdditionalExplainability";
 import ImageUploader from "@/components/ImageUploader";
 import ImagePreview from "@/components/ImagePreview";
 
@@ -285,6 +286,14 @@ export default function Analyze() {
                 {result.explanation.note}
               </p>
             </div>
+
+            {token && result.model === "FourModelStacking" && (
+              <AdditionalExplainability
+                key={result.analysis_id}
+                analysisId={result.analysis_id}
+                token={token}
+              />
+            )}
 
           </div>
         )}

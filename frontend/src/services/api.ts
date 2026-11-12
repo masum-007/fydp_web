@@ -96,7 +96,11 @@ export type AnalysisResponse = {
       url: string;
       sha256: string;
     };
+    gradcam?: { url: string; sha256: string };
+    lime?: { url: string; sha256: string };
+    shap?: { url: string; sha256: string };
   };
+  xai?: Partial<Record<ExplanationMethod, SavedExplanation>>;
 };
 
 // Converts API error responses into readable messages.
@@ -407,4 +411,45 @@ export async function registerInvestigator(
   }
 
   return (await response.json()) as RegisterResponse;
+}
+
+export type ExplanationMethod = "gradcam" | "lime" | "shap";
+
+export type SavedExplanation = {
+  method: string;
+  status: string;
+  created_at: string;
+  target_label: string;
+  model_version: string;
+  note: string;
+  interpretation: {
+    status: string;
+    narrative: string;
+    regions: unknown;
+  };
+};
+
+export async function getAnalysisDetails(
+  analysisId: string,
+  token: string
+): Promise<AnalysisResponse> {
+  const response = await authenticatedFetch(
+    `/api/analyses/${encodeURIComponent(analysisId)}`,
+    token
+  );
+  await checkResponse(response);
+  return (await response.json()) as AnalysisResponse;
+}
+
+export async function generateSavedExplanation(
+  analysisId: string,
+  method: ExplanationMethod,
+  token: string
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/analyses/${encodeURIComponent(analysisId)}/explain/${method}`,
+    token,
+    { method: "POST" }
+  );
+  await checkResponse(response);
 }
