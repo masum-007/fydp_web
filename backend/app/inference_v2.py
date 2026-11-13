@@ -14,7 +14,7 @@ This adapter deliberately matches that exported *production* inference path.
 Treat test metrics as not directly established for this path until parity is
 measured. Do not add the equalizer silently or claim exact test-set accuracy.
 
-Grad-CAM is a mean of four CNN *Fake-output, original-view* spatial attribution
+Grad-CAM is a mean of four CNN *predicted-category*, original-view spatial attribution
 maps, NOT a direct explanation of stacking or test-time augmentation. Its
 coordinate system is the analyzed face crop, not the original full image.
 """
@@ -260,8 +260,14 @@ class InferenceEngine:
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         return crop_face(rgb, self.detector, cv2)
 
-    def _gradcam(self, face_crop, model):
-        """Per-backbone original-view FAKE output Grad-CAM; matches notebook."""
+    def _gradcam(self, face_crop, model, target_label="Fake"):
+        """Per-backbone original-view class-specific Grad-CAM.
+
+        Real target is 1 - sigmoid(Fake). The mean of member maps remains
+        separate from and does not explain the stacking meta-learner.
+        """
+        if target_label not in ("Real", "Fake"):
+            raise ValueError("Grad-CAM target must be Real or Fake")
         tf, np, cv2 = self.tf, self.np, self.cv2
         rescaling = model.get_layer("preprocess_rescaling")
         backbone_index = next((i for i, layer in enumerate(model.layers)
@@ -279,7 +285,8 @@ class InferenceEngine:
             for layer in head_layers:
                 x = layer(x, training=False)
             fake_score = x[:, 0]
-        grads = tape.gradient(fake_score, fmap)
+            target_score = fake_score if target_label == "Fake" else 1.0 - fake_score
+        grads = tape.gradient(target_score, fmap)
         if grads is None:
             raise ValueError("Disconnected Grad-CAM gradients")
         weights = tf.reduce_mean(tf.cast(grads, tf.float32), axis=(0, 1, 2))
@@ -303,7 +310,9 @@ class InferenceEngine:
             # Average of four CNN maps: not a gradient of the stacking learner.
             maps, layers = [], {}
             for name in MODEL_ORDER:
-                heat, layer_name = self._gradcam(face_crop, self.models[name])
+                heat, layer_name = self._gradcam(
+                    face_crop, self.models[name], target_label=decision["prediction"]
+                )
                 maps.append(heat)
                 layers[name] = layer_name
             avg = self.np.mean(self.np.stack(maps), axis=0)
@@ -321,10 +330,24 @@ class InferenceEngine:
                 if not ok:
                     raise RuntimeError("Could not encode Grad-CAM PNG")
                 assets[name] = png.tobytes()
+            # Convert the Grad-CAM map already computed above into a saved,
+            # method-specific interpretation. Do NOT recompute Grad-CAM.
+            # Failure/missing MediaPipe asset must not break inference.
+            import os
+            from .explainability_service import gradcam_metadata_from_map
+            gradcam_meta = gradcam_metadata_from_map(
+                face_crop, avg,
+                model_version=self.model_version,
+                face_detected=bool(face_info["face_detected"]),
+                weak_activation=bool(maxval <= 1e-12),
+                landmarker_task=os.getenv("FACE_LANDMARKER_TASK"),
+                target_label=decision["prediction"],
+                per_model_maps=dict(zip(MODEL_ORDER, maps)),
+            )
             explanation = {
                 "method": "Grad-CAM",
                 "model": "Four backbone mean",
-                "target_label": "Fake",
+                "target_label": decision["prediction"],
                 "threshold": self.threshold,
                 "fake_probability": prob,
                 "layer": "Last nested backbone feature map per model",
@@ -332,7 +355,7 @@ class InferenceEngine:
                 "weak_activation": bool(maxval <= 0),
                 "scope": "mean_per_model_original_view_not_stacking",
                 "coordinate_space": "face_crop_224_rgb",
-                "note": "Average of four per-network Fake-output Grad-CAM maps on the unflipped face crop; not a direct explanation of the stacking classifier or TTA. Highlighted regions are not proof of manipulation.",
+                "note": "Mean of four predicted-class CNN Grad-CAM maps for the original face crop. This is not a gradient explanation of the stacking classifier or its flipped-image TTA. Bright regions are not evidence of editing.",
             }
             result = {
                 **decision,
@@ -347,5 +370,6 @@ class InferenceEngine:
                 "soft_vote_fake_probability": float(self.np.mean([per_model[n][0] for n in MODEL_ORDER])),
                 "members": members,
                 "explanation": explanation,
+                "xai": {"gradcam": gradcam_meta},
             }
             return result, assets

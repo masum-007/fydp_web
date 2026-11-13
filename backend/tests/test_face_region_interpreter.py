@@ -49,3 +49,25 @@ def test_no_face_gives_no_claim_of_location(monkeypatch):
     )
     assert result["status"] == "face_regions_unavailable"
     assert not result["narratives"]
+
+
+def test_hotspot_outside_all_facial_feature_masks_is_not_misnamed():
+    signal = np.zeros((32, 32), dtype=np.float32)
+    signal[0:2, 17:30] = 10.0  # forehead/background, outside all masks
+    signal[1:9, 1:9] = 0.001  # tiny unrelated eye-region activation
+    assert interpreter.dominant_regions(signal, _masks()) == []
+
+
+def test_real_gradcam_narrative_targets_real_not_fake(monkeypatch):
+    class Landmark:
+        x = y = .5
+    monkeypatch.setattr(interpreter, 'locate_single_face', lambda *_: [Landmark()] * 478)
+    monkeypatch.setattr(interpreter, 'region_masks', lambda *_: _masks())
+    heat = np.zeros((32, 32), dtype=np.float32)
+    heat[22:30, 22:30] = 1.0
+    result = interpreter.summarize_xai_regions(
+        np.zeros((32, 32, 3), dtype=np.uint8), 'unused',
+        gradcam_fake=heat, gradcam_target='Real',
+    )
+    assert 'Real-category' in result['narratives']['Grad-CAM']
+    assert 'Fake-category' not in result['narratives']['Grad-CAM']

@@ -101,6 +101,9 @@ export type AnalysisResponse = {
     shap?: { url: string; sha256: string };
   };
   xai?: Partial<Record<ExplanationMethod, SavedExplanation>>;
+  members?: Record<string, { prediction: "Real" | "Fake"; fake_probability: number; confidence: number }>;
+  tta_applied?: boolean;
+  face_detected?: boolean;
 };
 
 // Converts API error responses into readable messages.
@@ -452,4 +455,74 @@ export async function generateSavedExplanation(
     { method: "POST" }
   );
   await checkResponse(response);
+}
+
+// v3 management: typed models and explicitly confirmed deletion.
+export type ModelInfo = {
+  ready: boolean;
+  reason: string | null;
+  model: string;
+  mode: string;
+  members: string[];
+  threshold: number | null;
+  model_version: string | null;
+  explainability: string[];
+};
+
+export type LinkedCase = { id: string; title: string };
+export type AnalysisCaseLinks = Record<string, LinkedCase[]>;
+
+export async function getModelInfo(token: string): Promise<ModelInfo> {
+  const response = await authenticatedFetch("/api/model-info", token);
+  await checkResponse(response);
+  return (await response.json()) as ModelInfo;
+}
+
+export async function getAnalysisCaseLinks(token: string): Promise<AnalysisCaseLinks> {
+  const response = await authenticatedFetch("/api/analysis-case-links", token);
+  await checkResponse(response);
+  return (await response.json()) as AnalysisCaseLinks;
+}
+
+export async function editInvestigationCase(
+  token: string, caseId: string, title: string, description: string
+): Promise<void> {
+  const response = await authenticatedFetch(`/api/cases/${encodeURIComponent(caseId)}`, token, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, description }),
+  });
+  await checkResponse(response);
+}
+
+export async function unlinkAnalysisFromCase(
+  token: string, caseId: string, analysisId: string
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/cases/${encodeURIComponent(caseId)}/analyses/${encodeURIComponent(analysisId)}`,
+    token, { method: "DELETE" }
+  );
+  await checkResponse(response);
+}
+
+export async function permanentlyDeleteAnalysis(
+  token: string, analysisId: string
+): Promise<void> {
+  const response = await authenticatedFetch(
+    `/api/analyses/${encodeURIComponent(analysisId)}?confirm=true`, token,
+    { method: "DELETE" }
+  );
+  await checkResponse(response);
+}
+
+export async function permanentlyDeleteCase(
+  token: string, caseId: string, exactTitle: string
+): Promise<{ deleted_case: string; deleted_analyses: number }> {
+  const response = await authenticatedFetch(`/api/cases/${encodeURIComponent(caseId)}`, token, {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm_title: exactTitle, delete_analyses: true }),
+  });
+  await checkResponse(response);
+  return (await response.json()) as { deleted_case: string; deleted_analyses: number };
 }

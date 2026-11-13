@@ -10,6 +10,7 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from pathlib import Path
 
 import time
 from threading import Lock, BoundedSemaphore
@@ -34,10 +35,13 @@ from .schemas import (
     CaseCreate,
     CaseAnalysisAdd,
     CaseStatusUpdate,
+    CaseEdit,
+    CaseDeleteConfirm,
 )
 from .inference_v2 import InferenceEngine
 from .report_service import generate_forensic_report
 from .explainability_service import generate_explanation, SUPPORTED_METHODS
+from .inference_v2 import MODEL_ORDER
 
 
 def now():
@@ -72,7 +76,7 @@ def create_app(settings: Settings | None = None, engine=None):
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(settings.origins),
-        allow_methods=["GET", "POST", "PATCH"],
+        allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
     )
 
@@ -175,6 +179,23 @@ def create_app(settings: Settings | None = None, engine=None):
                 (user.id, "login", now()),
             )
         return Token(access_token=token, user=user)
+
+    @app.get("/api/model-info")
+    def model_info(user: User = Depends(current_user)):
+        """Authenticated display metadata; no secrets or arbitrary manifest paths."""
+        members = list(getattr(engine, "models", {}).keys())
+        if not members and getattr(engine, "ready", False):
+            members = list(MODEL_ORDER)
+        return {
+            "ready": bool(engine.ready),
+            "reason": engine.reason,
+            "model": "FourModelStacking" if members and len(members) == 4 else "Unavailable",
+            "mode": "stacking" if len(members) == 4 else "unknown",
+            "members": members,
+            "threshold": getattr(engine, "threshold", None),
+            "model_version": getattr(engine, "model_version", None),
+            "explainability": ["Grad-CAM", "LIME", "SHAP"],
+        }
 
     @app.get("/api/auth/me", response_model=User)
     def me(user: User = Depends(current_user)):
@@ -427,7 +448,7 @@ def create_app(settings: Settings | None = None, engine=None):
             landmarker_task = os.getenv("FACE_LANDMARKER_TASK")
             try:
                 image_png, meta = generate_explanation(
-                    engine, original, method, landmarker_task=landmarker_task,
+                    engine, original, method, landmarker_task=landmarker_task, target_label=result.get("prediction"),
                 )
             except Exception:
                 logging.getLogger(__name__).exception("XAI generation failed: %s", method)
@@ -802,6 +823,179 @@ def create_app(settings: Settings | None = None, engine=None):
             "id": case_id,
             "status": body.status,
         }
+
+    # -------------------- Case editing, links, and deletion --------------------
+
+    @app.patch("/api/cases/{case_id}")
+    def edit_case(case_id: str, body: CaseEdit, user: User = Depends(current_user)):
+        title = body.title.strip()
+        if len(title) < 3:
+            raise HTTPException(422, "Case title must have at least 3 characters.")
+        with connection(settings) as db:
+            row = db.execute(
+                "SELECT id FROM cases WHERE id=? AND user_id=?", (case_id, user.id)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "Case not found.")
+            db.execute(
+                "UPDATE cases SET title=?, description=? WHERE id=? AND user_id=?",
+                (title, body.description.strip(), case_id, user.id),
+            )
+            db.execute(
+                "INSERT INTO audit_events(user_id, action, created_at) VALUES (?,?,?)",
+                (user.id, "edit_case", now()),
+            )
+        return {"id": case_id, "title": title, "description": body.description.strip()}
+
+    @app.get("/api/analysis-case-links")
+    def analysis_case_links(user: User = Depends(current_user)):
+        """Return all case associations for this investigator's analyses."""
+        with connection(settings) as db:
+            rows = db.execute(
+                """SELECT ca.analysis_id, c.id AS case_id, c.title
+                   FROM case_analyses ca
+                   JOIN cases c ON c.id=ca.case_id
+                   JOIN analyses a ON a.id=ca.analysis_id
+                   WHERE c.user_id=? AND a.user_id=?
+                   ORDER BY c.title COLLATE NOCASE, c.id""",
+                (user.id, user.id),
+            ).fetchall()
+        links = {}
+        for row in rows:
+            links.setdefault(row["analysis_id"], []).append(
+                {"id": row["case_id"], "title": row["title"]}
+            )
+        return links
+
+    @app.delete("/api/cases/{case_id}/analyses/{analysis_id}")
+    def unlink_case_analysis(
+        case_id: str, analysis_id: str, user: User = Depends(current_user)
+    ):
+        with connection(settings) as db:
+            case = db.execute(
+                "SELECT status FROM cases WHERE id=? AND user_id=?", (case_id, user.id)
+            ).fetchone()
+            if case is None:
+                raise HTTPException(404, "Case not found.")
+            if case["status"] != "open":
+                raise HTTPException(409, "Reopen the case before removing an analysis.")
+            deleted = db.execute(
+                """DELETE FROM case_analyses WHERE case_id=? AND analysis_id=?
+                   AND EXISTS (SELECT 1 FROM analyses WHERE id=? AND user_id=?)""",
+                (case_id, analysis_id, analysis_id, user.id),
+            )
+            if deleted.rowcount == 0:
+                raise HTTPException(404, "Analysis is not attached to this case.")
+            db.execute(
+                "INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                (user.id, "unlink_case_analysis", now()),
+            )
+        return {"case_id": case_id, "analysis_id": analysis_id, "status": "unlinked"}
+
+    def delete_analysis_records(user, analysis_ids, case_id=None):
+        """Delete owned analysis rows and explanation files with rollback staging.
+
+        Original evidence is deliberately retained for provenance. Shared analyses
+        are blocked during case cascade deletion. A stand-alone analysis deletion
+        unlinks it from any cases. Files are moved to local staging before commit.
+        Backups and filesystem snapshots are outside this API's control.
+        """
+        analysis_ids = list(dict.fromkeys(analysis_ids))
+        staged = []
+        analysis_root = settings.data_dir / "analyses"
+        pending = settings.data_dir / ".delete_pending"
+        try:
+            with connection(settings) as db:
+                for analysis_id in analysis_ids:
+                    row = db.execute(
+                        "SELECT id FROM analyses WHERE id=? AND user_id=?",
+                        (analysis_id, user.id),
+                    ).fetchone()
+                    if row is None:
+                        raise HTTPException(404, "Analysis not found.")
+                if case_id is not None and analysis_ids:
+                    placeholders = ",".join("?" for _ in analysis_ids)
+                    query = (
+                        "SELECT DISTINCT analysis_id FROM case_analyses "
+                        f"WHERE analysis_id IN ({placeholders}) AND case_id<>?"
+                    )
+                    shared = db.execute(query, (*analysis_ids, case_id)).fetchall()
+                    if shared:
+                        raise HTTPException(
+                            409,
+                            "Case contains analyses shared with other cases. "
+                            "Unlink them from those cases before deleting this case.",
+                        )
+                # File names are immutable UUIDs from DB records, not user input.
+                pending.mkdir(exist_ok=True)
+                for analysis_id in analysis_ids:
+                    source = analysis_root / analysis_id
+                    if source.is_symlink():
+                        raise HTTPException(409, "Unsafe analysis asset path.")
+                    if source.exists():
+                        destination = pending / str(uuid4())
+                        source.rename(destination)
+                        staged.append((source, destination))
+                for analysis_id in analysis_ids:
+                    db.execute("DELETE FROM case_analyses WHERE analysis_id=?", (analysis_id,))
+                    db.execute(
+                        "DELETE FROM analyses WHERE id=? AND user_id=?",
+                        (analysis_id, user.id),
+                    )
+                if case_id is not None:
+                    db.execute("DELETE FROM cases WHERE id=? AND user_id=?", (case_id, user.id))
+                db.execute(
+                    "INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                    (user.id, "delete_case_and_analyses" if case_id else "delete_analysis", now()),
+                )
+        except Exception:
+            for source, destination in reversed(staged):
+                if destination.exists() and not source.exists():
+                    destination.rename(source)
+            raise
+        # After committed DB deletion, remove staged analysis explanation files.
+        for _, destination in staged:
+            try:
+                shutil.rmtree(destination)
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Manual cleanup required for deletion staging: %s", destination
+                )
+        return len(analysis_ids)
+
+    @app.delete("/api/analyses/{analysis_id}")
+    def delete_analysis(
+        analysis_id: str,
+        confirm: bool = Query(False),
+        user: User = Depends(current_user),
+    ):
+        if not confirm:
+            raise HTTPException(400, "Explicit confirmation required.")
+        count = delete_analysis_records(user, [analysis_id])
+        return {"deleted_analyses": count, "original_evidence_retained": True}
+
+    @app.delete("/api/cases/{case_id}")
+    def delete_case(
+        case_id: str, body: CaseDeleteConfirm, user: User = Depends(current_user)
+    ):
+        with connection(settings) as db:
+            case = db.execute(
+                "SELECT title FROM cases WHERE id=? AND user_id=?", (case_id, user.id)
+            ).fetchone()
+            if case is None:
+                raise HTTPException(404, "Case not found.")
+            if body.confirm_title != case["title"] or body.delete_analyses is not True:
+                raise HTTPException(400, "Type the exact case title to confirm deletion.")
+            linked = db.execute(
+                """SELECT ca.analysis_id FROM case_analyses ca
+                   JOIN analyses a ON a.id=ca.analysis_id
+                   WHERE ca.case_id=? AND a.user_id=?""",
+                (case_id, user.id),
+            ).fetchall()
+            analysis_ids = [row["analysis_id"] for row in linked]
+        count = delete_analysis_records(user, analysis_ids, case_id=case_id)
+        return {"deleted_case": case_id, "deleted_analyses": count,
+                "original_evidence_retained": True}
 
     @app.post("/api/quick-detect")
     def quick_detect(request: Request, file: UploadFile = File(...)):

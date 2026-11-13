@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import Sidebar from "@/components/Sidebar";
 import AdditionalExplainability from "@/components/AdditionalExplainability";
+import AnalysisActions from "@/components/AnalysisActions";
 import ImageUploader from "@/components/ImageUploader";
 import ImagePreview from "@/components/ImagePreview";
 
@@ -198,8 +199,8 @@ export default function Analyze() {
                 />
 
                 <Metric
-                  label="Model"
-                  value={result.model}
+                  label="Prediction system"
+                  value={result.model === "FourModelStacking" ? "Four-model stacking" : result.model}
                 />
 
                 <Metric
@@ -209,6 +210,16 @@ export default function Analyze() {
 
               </div>
 
+              {result.members && (
+                <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                  {Object.entries(result.members).map(([name, member]) => (
+                    <div key={name} className="rounded-xl bg-black/20 p-4 text-sm">
+                      <p className="font-semibold">{name}</p>
+                      <p className="mt-1 text-slate-300">{member.prediction} · {(member.fake_probability * 100).toFixed(1)}% Fake score</p>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="mt-8 space-y-3">
                 <p>
                   Fake probability:{" "}
@@ -294,6 +305,8 @@ export default function Analyze() {
                 token={token}
               />
             )}
+
+            {token && <AnalysisActions key={result.analysis_id} token={token} analysisId={result.analysis_id} />}
 
           </div>
         )}

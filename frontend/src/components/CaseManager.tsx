@@ -24,6 +24,10 @@ import {
   getAnalysisHistory,
   attachAnalysisToCase,
   updateCaseStatus,
+  editInvestigationCase,
+  unlinkAnalysisFromCase,
+  permanentlyDeleteAnalysis,
+  permanentlyDeleteCase,
   type InvestigationCase,
   type CaseDetails,
   type AnalysisResponse,
@@ -50,6 +54,26 @@ export default function CaseManager() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [editTitle, setEditTitle] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  function notifyHistoryChange() {
+    window.dispatchEvent(new Event("neuraledge-data-changed"));
+  }
+
+
+  // Refresh when Analysis History deletes a record outside this component.
+  useEffect(() => {
+    const onChange = () => {
+      setSelectedCase(null);
+      setLoading(true);
+      setRefreshKey((v) => v + 1);
+    };
+    window.addEventListener("neuraledge-data-changed", onChange);
+    return () => window.removeEventListener("neuraledge-data-changed", onChange);
+  }, []);
 
   // Load cases and available analyses when the page opens.
   useEffect(() => {
@@ -158,6 +182,10 @@ export default function CaseManager() {
       const details = await getCaseDetails(token, caseId);
 
       setSelectedCase(details);
+      setEditTitle(details.title);
+      setEditDescription(details.description);
+      setConfirmation("");
+      setAcknowledged(false);
       setSelectedAnalysisId("");
     } catch (err) {
       setError(
@@ -251,6 +279,72 @@ export default function CaseManager() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleEditCase(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!token || !selectedCase || busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await editInvestigationCase(token, selectedCase.id, editTitle.trim(), editDescription.trim());
+      const updated = await getCaseDetails(token, selectedCase.id);
+      setSelectedCase(updated);
+      await refreshCases(token);
+      setMessage("Case details updated.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Case edit failed.");
+    } finally { setBusy(false); }
+  }
+
+  async function handleUnlink(analysisId: string) {
+    if (!token || !selectedCase || busy) return;
+    if (!window.confirm("Remove this analysis from this case? The analysis itself will NOT be deleted.")) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await unlinkAnalysisFromCase(token, selectedCase.id, analysisId);
+      setSelectedCase(await getCaseDetails(token, selectedCase.id));
+      await refreshCases(token);
+      setMessage("Analysis unlinked. It still exists in history and reports.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not unlink analysis.");
+    } finally { setBusy(false); }
+  }
+
+  async function handleDeleteAnalysis(analysisId: string) {
+    if (!token || !selectedCase || busy) return;
+    if (!window.confirm("PERMANENTLY delete this analysis, its SHAP/LIME/Grad-CAM assets, and ALL its case links? Uploaded original evidence is retained.")) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await permanentlyDeleteAnalysis(token, analysisId);
+      setSelectedCase(await getCaseDetails(token, selectedCase.id));
+      setAnalyses((previous) => previous.filter((a) => a.analysis_id !== analysisId));
+      await refreshCases(token);
+      notifyHistoryChange();
+      setMessage("Analysis permanently deleted from the app; original uploaded evidence retained.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Cannot delete analysis.");
+    } finally { setBusy(false); }
+  }
+
+  async function handleDeleteCase() {
+    if (!token || !selectedCase || busy || !acknowledged || confirmation !== selectedCase.title) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await permanentlyDeleteCase(token, selectedCase.id, confirmation);
+      setSelectedCase(null);
+      setSelectedAnalysisId("");
+      setConfirmation("");
+      setAcknowledged(false);
+      const [updatedCases, updatedAnalyses] = await Promise.all([
+        getCases(token), getAnalysisHistory(token, 100, 0)
+      ]);
+      setCases(updatedCases);
+      setAnalyses(updatedAnalyses);
+      notifyHistoryChange();
+      setMessage(`Case deleted together with ${result.deleted_analyses} saved analyses. Original evidence uploads were retained.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Case deletion failed.");
+    } finally { setBusy(false); }
   }
 
   function handleRefresh() {
@@ -454,9 +548,20 @@ export default function CaseManager() {
                 {selectedCase?.id === item.id && (
                   <div className="mt-6 space-y-6 border-t border-white/10 pt-6">
 
-                    <h4 className="text-lg font-bold">
-                      Attached AI Analyses
-                    </h4>
+                    <form onSubmit={(event) => void handleEditCase(event)} className="space-y-3 rounded-xl bg-white/5 p-5">
+                      <h4 className="font-semibold">Edit case details</h4>
+                      <label className="block text-sm">Case title
+                        <input required minLength={3} maxLength={150} value={editTitle} onChange={(e) => setEditTitle(e.target.value)}
+                          className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 p-3" />
+                      </label>
+                      <label className="block text-sm">Description
+                        <textarea maxLength={2000} rows={2} value={editDescription} onChange={(e) => setEditDescription(e.target.value)}
+                          className="mt-2 w-full rounded-lg border border-white/10 bg-slate-900 p-3" />
+                      </label>
+                      <button type="submit" disabled={busy} className="rounded-lg bg-cyan-600 px-4 py-2 disabled:opacity-50">Save changes</button>
+                    </form>
+
+                    <h4 className="text-lg font-bold">Attached AI Analyses</h4>
 
                     {selectedCase.analyses.length === 0 ? (
                       <p className="text-sm text-slate-400">
@@ -478,7 +583,7 @@ export default function CaseManager() {
                                 </p>
 
                                 <p className="mt-2 text-sm">
-                                  Model: {analysis.model}
+                                  Model: {analysis.model === "FourModelStacking" ? "Four-model stacking (MobileNetV2, ResNet50V2, Xception, EfficientNetB0)" : analysis.model}
                                 </p>
 
                                 <p className="mt-1 text-sm">
@@ -496,7 +601,18 @@ export default function CaseManager() {
                               >
                                 {analysis.prediction}
                               </span>
-
+                            </div>
+                            <div className="mt-4 flex flex-wrap gap-3">
+                              {selectedCase.status === "open" && (
+                                <button type="button" disabled={busy} onClick={() => void handleUnlink(analysis.analysis_id)}
+                                  className="rounded-lg border border-slate-400/30 px-3 py-2 text-sm text-slate-200 disabled:opacity-50">
+                                  Remove from this case
+                                </button>
+                              )}
+                              <button type="button" disabled={busy} onClick={() => void handleDeleteAnalysis(analysis.analysis_id)}
+                                className="rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-300 disabled:opacity-50">
+                                Permanently delete analysis
+                              </button>
                             </div>
                           </div>
                         ))}
@@ -589,6 +705,25 @@ export default function CaseManager() {
                           : "Reopen Case"}
                       </button>
                     </div>
+
+                    <section className="space-y-3 rounded-xl border border-red-400/30 bg-red-500/5 p-5">
+                      <h4 className="font-semibold text-red-300">Danger zone — permanently delete case</h4>
+                      <p className="text-sm text-slate-300">
+                        This deletes the case and all {selectedCase.analyses.length} attached analyses and their explanation files.
+                        Original uploaded evidence is retained. If any analysis belongs to another case, deletion is blocked.
+                      </p>
+                      <label className="block text-sm">Type the exact case title to confirm
+                        <input aria-label="Confirm case deletion by title" value={confirmation} onChange={(e) => setConfirmation(e.target.value)}
+                          className="mt-2 w-full rounded-lg border border-red-400/30 bg-slate-900 p-3" />
+                      </label>
+                      <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)}/>
+                        I understand this cannot be undone from the application.</label>
+                      <button type="button" disabled={busy || !acknowledged || confirmation !== selectedCase.title}
+                        onClick={() => void handleDeleteCase()}
+                        className="rounded-lg bg-red-700 px-4 py-3 text-white disabled:opacity-40">
+                        Permanently delete case and its analyses
+                      </button>
+                    </section>
 
                   </div>
                 )}

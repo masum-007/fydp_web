@@ -9,6 +9,7 @@ import { useAuth } from "@/components/auth/AuthProvider";
 
 import {
   getAnalysisHistory,
+  permanentlyDeleteAnalysis,
   type AnalysisResponse,
 } from "@/services/api";
 
@@ -19,6 +20,22 @@ export default function CasesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  async function deleteSavedAnalysis(id: string) {
+    if (!token || deletingId) return;
+    if (!window.confirm("PERMANENTLY delete this analysis, its explanation images, and all case associations? Uploaded original evidence is retained.")) return;
+    setDeletingId(id);
+    setError("");
+    try {
+      await permanentlyDeleteAnalysis(token, id);
+      setAnalyses((old) => old.filter((a) => a.analysis_id !== id));
+      setSelected((previous) => previous === id ? null : previous);
+      window.dispatchEvent(new Event("neuraledge-data-changed"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed.");
+    } finally { setDeletingId(null); }
+  }
 
   const loadHistory = useCallback(async () => {
     if (!token) {
@@ -82,6 +99,12 @@ export default function CasesPage() {
     cancelled = true;
   };
 }, [token]);
+
+  useEffect(() => {
+    const refresh = () => { void loadHistory(); };
+    window.addEventListener("neuraledge-data-changed", refresh);
+    return () => window.removeEventListener("neuraledge-data-changed", refresh);
+  }, [loadHistory]);
 
   return (
     <div className="min-h-screen pt-32 lg:ml-[340px] px-8 pb-20 text-white">
@@ -204,7 +227,7 @@ export default function CasesPage() {
                     </td>
 
                     <td className="p-4">
-                      {analysis.model}
+                      {analysis.model === "FourModelStacking" ? "Four-model stacking" : analysis.model}
                     </td>
 
                     <td className="p-4 text-sm text-slate-400">
@@ -230,6 +253,11 @@ export default function CasesPage() {
                         {selected === analysis.analysis_id
                           ? "Hide"
                           : "View"}
+                      </button>
+                      <button type="button" disabled={deletingId !== null}
+                        onClick={() => void deleteSavedAnalysis(analysis.analysis_id)}
+                        className="ml-2 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 disabled:opacity-50">
+                        {deletingId === analysis.analysis_id ? "Deleting..." : "Delete"}
                       </button>
                     </td>
                   </tr>

@@ -55,3 +55,13 @@ class CaseAnalysisAdd(BaseModel):
 
 class CaseStatusUpdate(BaseModel):
     status: Literal["open", "closed"]
+
+
+class CaseEdit(BaseModel):
+    title: str = Field(min_length=3, max_length=150)
+    description: str = Field(default="", max_length=2000)
+
+
+class CaseDeleteConfirm(BaseModel):
+    confirm_title: str
+    delete_analyses: Literal[True]
