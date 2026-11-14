@@ -8,23 +8,24 @@ import {
   FileSearch,
   ShieldAlert,
   CheckCircle,
-  FileText,
+  FolderOpen,
   RefreshCw,
 } from "lucide-react";
 
-import Sidebar from "@/components/Sidebar";
 import StatsCard from "@/components/StatsCard";
 import QuickActions from "@/components/QuickActions";
 
 import { useAuth } from "@/components/auth/AuthProvider";
 import {
   getAnalysisHistory,
+  getCases,
   type AnalysisResponse,
 } from "@/services/api";
 
 export default function Dashboard() {
   const { user, token } = useAuth();
 
+  const [activeCases, setActiveCases] = useState<number | null>(null);
   const [analyses, setAnalyses] =
     useState<AnalysisResponse[]>([]);
 
@@ -40,13 +41,11 @@ export default function Dashboard() {
 
     async function fetchDashboard() {
       try {
-        const data = await getAnalysisHistory(
-          authToken,
-          50,
-          0
-        );
-
+        const [data, caseData] = await Promise.all([
+          getAnalysisHistory(authToken, 50, 0), getCases(authToken),
+        ]);
         if (!cancelled) {
+          setActiveCases(caseData.filter((c) => c.status === "open").length);
           setAnalyses(data);
           setError("");
         }
@@ -83,10 +82,10 @@ export default function Dashboard() {
   const recent = analyses.slice(0, 5);
 
   return (
-    <div className="min-h-screen pt-32 text-white">
-      <Sidebar />
+    <div className="min-h-screen pt-8 text-white">
 
-      <main className="mx-auto max-w-[1600px] px-8 pb-20 pt-6 lg:ml-[340px]">
+
+      <main className="mx-auto max-w-[1600px] px-8 pb-20 pt-6 ">
 
         {/* Dashboard Header */}
         <div className="flex flex-wrap items-start justify-between gap-6">
@@ -173,9 +172,9 @@ export default function Dashboard() {
               />
 
               <StatsCard
-                title="Generated Reports"
-                value="Not available"
-                icon={<FileText />}
+                title="Active Cases"
+                value={activeCases === null ? "—" : String(activeCases)}
+                icon={<FolderOpen />}
               />
 
             </div>

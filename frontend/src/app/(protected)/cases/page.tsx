@@ -2,14 +2,16 @@
 "use client";
 
 import CaseManager from "@/components/CaseManager";
-import { useCallback, useEffect, useState } from "react";
+import EvidenceThumbnail from "@/components/EvidenceThumbnail";
+import { Fragment, useCallback, useEffect, useState } from "react";
 
-import Sidebar from "@/components/Sidebar";
 import { useAuth } from "@/components/auth/AuthProvider";
 
 import {
   getAnalysisHistory,
   permanentlyDeleteAnalysis,
+  getAnalysisDetails,
+  downloadForensicReport,
   type AnalysisResponse,
 } from "@/services/api";
 
@@ -20,6 +22,9 @@ export default function CasesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [viewed, setViewed] = useState<AnalysisResponse | null>(null);
+  const [detailBusy, setDetailBusy] = useState<string | null>(null);
+  const [downloadBusy, setDownloadBusy] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   async function deleteSavedAnalysis(id: string) {
@@ -31,10 +36,27 @@ export default function CasesPage() {
       await permanentlyDeleteAnalysis(token, id);
       setAnalyses((old) => old.filter((a) => a.analysis_id !== id));
       setSelected((previous) => previous === id ? null : previous);
+      setViewed((old) => old?.analysis_id === id ? null : old);
       window.dispatchEvent(new Event("neuraledge-data-changed"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed.");
     } finally { setDeletingId(null); }
+  }
+
+  async function viewAnalysis(id: string) {
+    if (!token) return;
+    if (selected === id) {setSelected(null);setViewed(null);return;}
+    setSelected(id);setViewed(null);setDetailBusy(id);setError("");
+    try { const data = await getAnalysisDetails(id, token); setViewed(data); }
+    catch(err) {setError(err instanceof Error ? err.message : "Unable to open analysis details.");}
+    finally {setDetailBusy(null);}
+  }
+  async function downloadAnalysis(id: string) {
+    if (!token) return;
+    setDownloadBusy(true);setError("");
+    try { await downloadForensicReport(id,token); }
+    catch(err) {setError(err instanceof Error ? err.message : "PDF download failed.");}
+    finally {setDownloadBusy(false);}
   }
 
   const loadHistory = useCallback(async () => {
@@ -107,8 +129,8 @@ export default function CasesPage() {
   }, [loadHistory]);
 
   return (
-    <div className="min-h-screen pt-32 lg:ml-[340px] px-8 pb-20 text-white">
-      <Sidebar />
+    <div className="min-h-screen pt-8  px-8 pb-20 text-white">
+
 
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -204,8 +226,8 @@ export default function CasesPage() {
 
               <tbody>
                 {analyses.map((analysis) => (
+                  <Fragment key={analysis.analysis_id}>
                   <tr
-                    key={analysis.analysis_id}
                     className="border-b border-white/5"
                   >
                     <td className="p-4 font-mono text-xs">
@@ -238,21 +260,16 @@ export default function CasesPage() {
 
                     <td className="p-4">
                       <button
-                        onClick={() =>
-                          setSelected(
-                            selected === analysis.analysis_id
-                              ? null
-                              : analysis.analysis_id
-                          )
-                        }
+                        type="button"
+                        onClick={() => void viewAnalysis(analysis.analysis_id)}
                         aria-expanded={
                           selected === analysis.analysis_id
                         }
                         className="rounded-lg bg-cyan-600/20 px-4 py-2 text-sm text-cyan-300 hover:bg-cyan-600/30"
                       >
                         {selected === analysis.analysis_id
-                          ? "Hide"
-                          : "View"}
+                          ? "Hide details"
+                          : "View details"}
                       </button>
                       <button type="button" disabled={deletingId !== null}
                         onClick={() => void deleteSavedAnalysis(analysis.analysis_id)}
@@ -261,91 +278,21 @@ export default function CasesPage() {
                       </button>
                     </td>
                   </tr>
+                  {selected === analysis.analysis_id && <tr className="border-b border-cyan-400/20 bg-cyan-500/5"><td colSpan={6} className="p-5 sm:p-7">
+                    {detailBusy === analysis.analysis_id ? <p role="status" className="text-cyan-300">Loading analysis details...</p> : viewed?.analysis_id === analysis.analysis_id ? <div className="space-y-5">
+                      <div className="flex flex-wrap items-center gap-4"><EvidenceThumbnail evidenceId={viewed.evidence_id} token={token!}/><div><h3 className="text-lg font-semibold text-white">Saved analysis details</h3><p className="mt-1 text-sm text-slate-400">Analyzed {new Date(viewed.created_at).toLocaleString()}</p><p className="mt-1 break-all font-mono text-xs text-slate-500">{viewed.analysis_id}</p></div></div>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Detail label="Classification" value={viewed.prediction}/><Detail label="Fake-category score" value={`${(viewed.fake_probability*100).toFixed(2)}%`}/><Detail label="Decision threshold" value={viewed.threshold.toFixed(2)}/><Detail label="Model" value={viewed.model === "FourModelStacking" ? "Four-model stacking" : viewed.model}/></div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 p-4"><h4 className="font-semibold">Saved explanations</h4><p className="mt-2 text-sm text-slate-300">Grad-CAM: {viewed.xai?.gradcam?.status === "completed" ? "Available" : "Original heatmap saved"} · LIME: {viewed.xai?.lime?.status === "completed" ? "Available" : "Not generated"} · SHAP: {viewed.xai?.shap?.status === "completed" ? "Available" : "Not generated"}</p><p className="mt-3 break-all text-xs text-slate-500">Evidence SHA-256: {viewed.image_sha256}</p></div>
+                      <div className="flex flex-wrap gap-3"><button type="button" disabled={downloadBusy} onClick={() => void downloadAnalysis(viewed.analysis_id)} className="rounded-xl bg-cyan-600 px-4 py-2.5 text-sm font-semibold disabled:opacity-50">{downloadBusy ? "Generating..." : "Download PDF"}</button><button type="button" onClick={() => {setSelected(null);setViewed(null);}} className="rounded-xl border border-white/20 px-4 py-2.5 text-sm">Close details</button></div>
+                      <p className="text-xs text-amber-200">NeuralEdge AI provides screening support, not proof of authenticity or manipulation.</p>
+                    </div> : <p role="alert" className="text-amber-200">Details are unavailable. Please retry View details.</p>}
+                  </td></tr>}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
           </div>
 
-          {analyses
-            .filter((a) => a.analysis_id === selected)
-            .map((analysis) => (
-              <div
-                key={analysis.analysis_id}
-                className="rounded-3xl border border-white/10 bg-white/5 p-8"
-              >
-                <h2 className="text-2xl font-bold">
-                  Analysis Details
-                </h2>
-
-                <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                  <Detail
-                    label="Prediction"
-                    value={analysis.prediction}
-                  />
-
-                  <Detail
-                    label="Confidence"
-                    value={`${(
-                      analysis.confidence * 100
-                    ).toFixed(2)}%`}
-                  />
-
-                  <Detail
-                    label="Fake Probability"
-                    value={`${(
-                      analysis.fake_probability * 100
-                    ).toFixed(2)}%`}
-                  />
-
-                  <Detail
-                    label="Real Probability"
-                    value={`${(
-                      analysis.real_probability * 100
-                    ).toFixed(2)}%`}
-                  />
-
-                  <Detail
-                    label="Model"
-                    value={analysis.model}
-                  />
-
-                  <Detail
-                    label="Threshold"
-                    value={analysis.threshold.toFixed(3)}
-                  />
-
-                  <Detail
-                    label="Inference Mode"
-                    value={analysis.mode}
-                  />
-
-                  <Detail
-                    label="Explainability"
-                    value={analysis.explanation.method}
-                  />
-                </div>
-
-                <div className="mt-6 space-y-3 text-xs text-slate-400">
-                  <p className="break-all">
-                    Analysis ID: {analysis.analysis_id}
-                  </p>
-
-                  <p className="break-all">
-                    Evidence ID: {analysis.evidence_id}
-                  </p>
-
-                  <p className="break-all">
-                    Image SHA-256: {analysis.image_sha256}
-                  </p>
-                </div>
-
-                <p className="mt-6 text-sm text-amber-200">
-                  AI predictions support forensic
-                  investigation but do not constitute
-                  proof of image manipulation.
-                </p>
-              </div>
-            ))}
         </div>
       )}
     </div>

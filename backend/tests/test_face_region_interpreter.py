@@ -69,5 +69,5 @@ def test_real_gradcam_narrative_targets_real_not_fake(monkeypatch):
         np.zeros((32, 32, 3), dtype=np.uint8), 'unused',
         gradcam_fake=heat, gradcam_target='Real',
     )
-    assert 'Real-category' in result['narratives']['Grad-CAM']
+    assert 'While checking for Real' in result['narratives']['Grad-CAM']
     assert 'Fake-category' not in result['narratives']['Grad-CAM']

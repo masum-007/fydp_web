@@ -22,8 +22,8 @@ export default function RegisterForm() {
     event.preventDefault();
     setError("");
 
-    if (password.length < 12) {
-      setError("Password must contain at least 12 characters.");
+    if (password.length < 8) {
+      setError("Password must contain at least 8 characters.");
       return;
     }
 
@@ -105,13 +105,13 @@ export default function RegisterForm() {
             id="password"
             type="password"
             required
-            minLength={12}
+            minLength={8}
             maxLength={128}
             autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="w-full rounded-xl border border-white/10 bg-black/20 p-3"
-            placeholder="At least 12 characters"
+            placeholder="At least 8 characters"
           />
         </div>
 
@@ -123,7 +123,7 @@ export default function RegisterForm() {
             id="confirm"
             type="password"
             required
-            minLength={12}
+            minLength={8}
             maxLength={128}
             autoComplete="new-password"
             value={confirmPassword}

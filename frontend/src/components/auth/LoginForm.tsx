@@ -2,18 +2,22 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "./AuthProvider";
 
 export default function LoginForm() {
-  const { login } = useAuth();
+  const { login, status } = useAuth();
   const router = useRouter();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [returningToPage, setReturningToPage] = useState(false);
+  useEffect(() => {
+    setReturningToPage(new URLSearchParams(window.location.search).has("next"));
+  }, []);
 
   async function handleLogin(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -24,7 +28,10 @@ export default function LoginForm() {
     try {
       await login(email, password);
 
-      router.push("/dashboard");
+      const next = new URLSearchParams(window.location.search).get("next");
+      const safeNext = next?.startsWith("/") && !next.startsWith("//") && !next.includes("\\")
+        ? next : "/dashboard";
+      router.replace(safeNext);
     } catch (err) {
       setError(
         err instanceof Error
@@ -46,6 +53,11 @@ export default function LoginForm() {
       <p className="mt-3 text-slate-400">
         Access NeuralEdge AI forensic workspace
       </p>
+      {returningToPage && (
+        <p role="status" className="mt-3 rounded-lg bg-cyan-500/10 p-3 text-sm text-cyan-200">
+          Sign in to continue to the page you requested. Sessions are restored automatically while valid.
+        </p>
+      )}
 
       <form onSubmit={handleLogin}>
 
@@ -79,10 +91,10 @@ export default function LoginForm() {
 
         <button
           type="submit"
-          disabled={loading}
+          disabled={loading || status === "checking"}
           className="mt-8 w-full rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 py-4 font-semibold text-white disabled:opacity-50"
         >
-          {loading ? "Logging in..." : "Login"}
+          {loading ? "Logging in..." : status === "checking" ? "Checking session..." : "Login"}
         </button>
 
       </form>

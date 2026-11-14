@@ -1,451 +1,161 @@
 "use client";
 
-import { useAuth } from "./auth/AuthProvider";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-
-import {
-  ShieldCheck,
-  UserCircle,
-  ChevronDown
-} from "lucide-react";
-
-
-export default function Navbar(){
-
-const {
-user,
-logout
-}=useAuth();
-
-const router=useRouter();
-
-const pathname = usePathname();
-
-
-
-const publicLinks = [
-
-{
-name:"Home",
-path:"/"
-},
-
-{
-name:"Try Detection",
-path:"/detect"
-}
-
-];
-
-
-const privateLinks = [
-
-{
-name:"Dashboard",
-path:"/dashboard"
-},
-
-{
-name:"Analyze",
-path:"/analyze"
-},
-
-{
-name:"Cases",
-path:"/cases"
-},
-
-{
-name:"Reports",
-path:"/reports"
-}
-
-];
-
-
-const links =
-user?.role === "investigator"
-?
-privateLinks
-:
-publicLinks;
-
-
-
-return (
-
-<nav
-
-className="
-fixed
-top-0
-left-0
-right-0
-z-50
-px-6
-pt-5
-"
-
->
-
-
-<div
-
-className="
-max-w-7xl
-mx-auto
-flex
-items-center
-justify-between
-rounded-2xl
-border
-border-white/10
-bg-[#0b1020]/80
-backdrop-blur-xl
-px-8
-py-4
-shadow-lg
-"
-
->
-
-
-
-{/* LOGO */}
-
-
-<Link
-
-href="/"
-
-className="
-flex
-items-center
-gap-3
-group
-"
-
->
-
-
-<div
-
-className="
-flex
-items-center
-justify-center
-h-11
-w-11
-rounded-xl
-bg-cyan-400/10
-border
-border-cyan-400/30
-group-hover:bg-cyan-400/20
-transition
-"
-
->
-
-
-<ShieldCheck
-
-className="
-text-cyan-400
-"
-
-size={26}
-
-/>
-
-
-</div>
-
-
-
-<div>
-
-
-<h1
-className="
-text-xl
-font-bold
-tracking-wide
-text-white
-"
->
-NeuralEdge AI
-</h1>
-
-
-
-<p
-
-className="
-text-xs
-text-slate-400
-"
-
->
-
-AI Forensic Intelligence
-
-</p>
-
-
-</div>
-
-
-
-</Link>
-
-
-
-
-
-{/* NAV LINKS */}
-
-
-<div
-
-className="
-hidden
-md:flex
-items-center
-gap-2
-"
-
->
-
-
-{
-links.map((link)=>(
-
-
-<Link
-
-key={link.path}
-
-href={link.path}
-
-className={`
-
-px-5
-py-2.5
-rounded-xl
-transition
-duration-300
-
-${
-pathname===link.path
-
-?
-
-"bg-cyan-400/10 text-cyan-300"
-
-:
-
-"text-slate-300 hover:bg-white/10 hover:text-white"
-
-}
-
-`}
-
->
-
-
-{link.name}
-
-
-</Link>
-
-
-))
-
-}
-
-
-
-</div>
-
-
-
-
-
-
-{/* USER AREA */}
-
-<div
-
-className="
-hidden
-md:flex
-items-center
-gap-3
-rounded-xl
-border
-border-white/10
-bg-white/5
-px-4
-py-2
-"
-
->
-
-
-<UserCircle
-
-className="
-text-cyan-400
-"
-
-size={25}
-
-/>
-
-
-<div
-className="
-text-left
-"
-
->
-
-
-<p
-
-className="
-text-sm
-font-medium
-text-white
-"
-
->
-
-{
-user?.role === "investigator"
-
-?
-
-"Investigator"
-
-:
-
-"Guest User"
-
-}
-
-</p>
-
-
-
-<p
-
-className="
-text-xs
-text-slate-400
-"
-
->
-
-{
-user?.role === "investigator"
-
-?
-
-"Active Session"
-
-:
-
-"Public Access"
-
-}
-
-</p>
-
-
-</div>
-
-
-
-{
-
-user?.role === "investigator"
-
-?
-
-<button
-
-onClick={()=>{
-
-logout();
-
-router.push("/");
-
-}}
-
-className="
-text-xs
-text-red-400
-hover:text-red-300
-ml-3
-"
-
->
-
-Logout
-
-</button>
-
-
-:
-
-<Link
-
-href="/login"
-
-className="
-text-xs
-text-cyan-400
-hover:text-cyan-300
-ml-3
-"
-
->
-
-Login
-
-</Link>
-
-
-}
-
-
-
-<ChevronDown
-
-size={16}
-
-className="
-text-slate-400
-"
-
-/>
-
-
-
-</div>
-
-
-
-</div>
-
-
-
-</nav>
-
-
-)
-
+import Image from "next/image";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+import { UserCircle, ChevronDown, Settings, LogOut } from "lucide-react";
+import { useAuth } from "@/components/auth/AuthProvider";
+
+/**
+ * One seamless, edge-to-edge header for public and investigator pages.
+ * The landing page still compacts on scroll; the investigator header stays
+ * the same height to maintain stable alignment with the workspace sidebar.
+ * Fixed positioning works inside the landing page's overflow-hidden wrapper.
+ */
+export default function Navbar() {
+  const { user, status, logout } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+  const isLanding = pathname === "/";
+  const [isScrolled, setIsScrolled] = useState(false);
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!isLanding) {
+      setIsScrolled(false);
+      return;
+    }
+
+    // Refresh and back/forward navigation must also show the correct size.
+    const update = () => setIsScrolled(window.scrollY > 48);
+    update();
+    window.addEventListener("scroll", update, { passive: true });
+    return () => window.removeEventListener("scroll", update);
+  }, [isLanding]);
+
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const key = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", key);
+    };
+  }, []);
+
+  async function signOut() {
+    try {
+      await logout();
+      setOpen(false);
+      router.replace("/login");
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Could not sign out.");
+    }
+  }
+
+  const compact = isLanding && isScrolled;
+
+  return (
+    <header
+      className={`fixed inset-x-0 top-0 z-50 border-b backdrop-blur-xl transition-[height,background-color,border-color,box-shadow] duration-300 ease-out motion-reduce:transition-none ${
+        compact
+          ? "h-[62px] border-cyan-400/20 bg-[#050816]/95 shadow-[0_8px_28px_rgba(0,0,0,0.18)]"
+          : "h-[76px] border-white/10 bg-[#050816]/95"
+      }`}
+    >
+      <div className="mx-auto flex h-full w-full max-w-[1920px] items-center justify-between gap-4 px-4 sm:px-8 lg:px-10">
+        <Link
+          href={user ? "/dashboard" : "/"}
+          className="flex min-w-0 items-center gap-2 sm:gap-3 focus-visible:rounded-lg focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-cyan-300"
+          aria-label="NeuralEdge AI home"
+        >
+          <span
+            className={`flex shrink-0 items-center justify-center overflow-hidden rounded-xl border border-cyan-400/30 bg-[#050816] transition-[width,height] duration-300 ease-out motion-reduce:transition-none ${
+              compact ? "h-9 w-9" : "h-9 w-9 sm:h-11 sm:w-11"
+            }`}
+          >
+            <Image
+              src="/branding/neuraledge-mark.png"
+              alt=""
+              width={160}
+              height={160}
+              priority
+              className="h-full w-full object-cover"
+              aria-hidden="true"
+            />
+          </span>
+          <span className="min-w-0">
+            <span className={`block whitespace-nowrap font-bold text-white transition-[font-size] duration-300 motion-reduce:transition-none ${compact ? "text-base" : "text-base sm:text-lg"}`}>
+              NeuralEdge AI
+            </span>
+            <span
+              className={`hidden overflow-hidden whitespace-nowrap text-xs sm:block leading-4 text-slate-400 transition-[max-height,opacity] duration-300 ease-out motion-reduce:transition-none ${
+                compact ? "max-h-0 opacity-0" : "max-h-5 opacity-100"
+              }`}
+            >
+              AI Forensic Intelligence
+            </span>
+          </span>
+        </Link>
+
+        {user ? (
+          <div ref={menuRef} className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setOpen((value) => !value)}
+              aria-expanded={open}
+              aria-haspopup="menu"
+              className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left hover:border-cyan-400/40 sm:gap-3 sm:px-4"
+            >
+              <UserCircle size={24} className="text-cyan-400" aria-hidden="true" />
+              <span className="max-w-[150px] truncate text-sm font-semibold text-white">{user.name}</span>
+              <ChevronDown size={17} className="text-slate-400" aria-hidden="true" />
+            </button>
+            {open && (
+              <div role="menu" aria-label="Account menu" className="absolute right-0 mt-2 w-64 rounded-xl border border-white/15 bg-[#111a2b] p-2 shadow-2xl">
+                <div className="border-b border-white/10 px-3 py-3">
+                  <p className="truncate text-sm font-semibold text-white">{user.name}</p>
+                  <p className="truncate text-xs text-slate-400">{user.email}</p>
+                </div>
+                <Link role="menuitem" href="/settings#profile" className="mt-2 flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10">
+                  <UserCircle size={17} aria-hidden="true" /> My profile
+                </Link>
+                <Link role="menuitem" href="/settings" className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm hover:bg-white/10">
+                  <Settings size={17} aria-hidden="true" /> Settings &amp; security
+                </Link>
+                <button role="menuitem" type="button" onClick={() => void signOut()} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-red-300 hover:bg-red-400/10">
+                  <LogOut size={17} aria-hidden="true" /> Logout
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <nav aria-label="Public navigation" className="flex shrink-0 items-center gap-2 text-sm sm:gap-3">
+            {status === "checking" ? (
+              <span className="text-xs text-slate-400 sm:text-sm">Checking session...</span>
+            ) : (
+              <>
+                <Link href="/" className="hidden text-slate-300 hover:text-white sm:block">Home</Link>
+                <Link href="/detect" className="hidden text-cyan-300 hover:text-white sm:inline">Try detection</Link>
+                <Link href="/login" className="rounded-xl border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-cyan-200 transition-colors hover:bg-cyan-400/20">Login</Link>
+              </>
+            )}
+          </nav>
+        )}
+      </div>
+    </header>
+  );
 }

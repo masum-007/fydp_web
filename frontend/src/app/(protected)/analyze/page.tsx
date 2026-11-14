@@ -4,7 +4,6 @@ import { resultInPlainLanguage } from "@/utils/xaiReaderCopy";
 
 import { useEffect, useState } from "react";
 
-import Sidebar from "@/components/Sidebar";
 import AdditionalExplainability from "@/components/AdditionalExplainability";
 import AnalysisActions from "@/components/AnalysisActions";
 import ImageUploader from "@/components/ImageUploader";
@@ -130,8 +129,8 @@ export default function Analyze() {
   }
 
   return (
-    <div className="min-h-screen pt-32 lg:ml-[340px] px-8 pb-20 text-white">
-      <Sidebar />
+    <div className="min-h-screen pt-8  px-8 pb-20 text-white">
+
 
       <h1 className="text-5xl font-bold">
         Analyze Evidence
@@ -302,13 +301,13 @@ export default function Analyze() {
 
             {token && result.model === "FourModelStacking" && (
               <AdditionalExplainability
-                key={result.analysis_id}
+                key={`xai-${result.analysis_id}`}
                 analysisId={result.analysis_id}
                 token={token}
               />
             )}
 
-            {token && <AnalysisActions key={result.analysis_id} token={token} analysisId={result.analysis_id} />}
+            {token && <AnalysisActions key={`actions-${result.analysis_id}`} token={token} analysisId={result.analysis_id} />}
 
           </div>
         )}

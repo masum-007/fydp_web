@@ -6,7 +6,7 @@ class Register(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
     name: str = Field(min_length=1, max_length=100)
     email: EmailStr
-    password: str = Field(min_length=12, max_length=128)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class Login(BaseModel):
@@ -65,3 +65,14 @@ class CaseEdit(BaseModel):
 class CaseDeleteConfirm(BaseModel):
     confirm_title: str
     delete_analyses: Literal[True]
+
+
+class ProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=100)
+
+
+class PasswordUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)

@@ -1,6 +1,59 @@
+// All authenticated calls use the same-origin Next.js /api rewrite.
+// Never persist access JWTs in localStorage or sessionStorage.
+const API_URL = "";
+let activeAccessToken: string | null = null;
+let sessionEpoch = 0;
+let pendingRefresh: Promise<LoginResponse> | null = null;
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+export function setAccessToken(value: string | null): void {
+  activeAccessToken = value;
+  sessionEpoch += 1;
+}
+
+function notifySessionExpired(): void {
+  activeAccessToken = null;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("neuraledge-session-expired"));
+  }
+}
+
+export async function restoreSession(): Promise<LoginResponse> {
+  if (!pendingRefresh) {
+    pendingRefresh = (async () => {
+      const startedAtEpoch = sessionEpoch;
+      const response = await fetch("/api/auth/refresh", {
+        method: "POST", credentials: "same-origin", cache: "no-store",
+      });
+      if (!response.ok) {
+        if (response.status === 401) {
+          if (sessionEpoch === startedAtEpoch) notifySessionExpired();
+          throw new Error("Your saved session has expired. Please log in again.");
+        }
+        throw new Error(`Unable to restore your session (HTTP ${response.status}).`);
+      }
+      const session = (await response.json()) as LoginResponse;
+      if (sessionEpoch !== startedAtEpoch) {
+        throw new Error("A newer login or logout superseded this session request.");
+      }
+      setAccessToken(session.access_token);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("neuraledge-token-renewed", { detail: session }));
+      }
+      return session;
+    })().finally(() => { pendingRefresh = null; });
+  }
+  return pendingRefresh;
+}
+
+export async function endServerSession(): Promise<void> {
+  const response = await fetch("/api/auth/logout", {
+    method: "POST", credentials: "same-origin", cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error("Could not log out securely. Please retry while the server is reachable.");
+  }
+  setAccessToken(null);
+}
 
 export type Investigator = {
   id: string;
@@ -27,6 +80,7 @@ export async function loginUser(
     },
     body: JSON.stringify({ email, password }),
     cache: "no-store",
+    credentials: "same-origin",
   });
 
   if (!response.ok) {
@@ -45,14 +99,31 @@ export async function authenticatedFetch(
   token: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  const headers = new Headers(options.headers);
-  headers.set("Authorization", `Bearer ${token}`);
+  if (!path.startsWith("/api/") || path.startsWith("//")) {
+    throw new Error("Invalid authenticated API path.");
+  }
+  const send = (accessToken: string) => {
+    const headers = new Headers(options.headers);
+    headers.set("Authorization", `Bearer ${accessToken}`);
+    return fetch(`${API_URL}${path}`, {
+      ...options, headers, cache: "no-store", credentials: "same-origin",
+    });
+  };
+  let response = await send(activeAccessToken ?? token);
+  if (response.status !== 401) return response;
 
-  return fetch(`${API_URL}${path}`, {
-    ...options,
-    headers,
-    cache: "no-store",
-  });
+  // A 30-minute access JWT may expire during an otherwise valid 7-day
+  // remembered session. Renew once, then retry the original request.
+  let session: LoginResponse;
+  try {
+    session = await restoreSession();
+  } catch {
+    // No session means no retry. The auth context handles the redirect.
+    return response;
+  }
+  response = await send(session.access_token);
+  if (response.status === 401) notifySessionExpired();
+  return response;
 }
 
 export type EvidenceResponse = {
@@ -222,36 +293,71 @@ export async function getAnalysisHistory(
   return (await response.json()) as AnalysisResponse[];
 }
 
+async function saveAuthenticatedDownload(
+  path: string,
+  token: string,
+  filename: string,
+  expectedMime: "application/pdf" | "application/zip"
+): Promise<void> {
+  const response = await authenticatedFetch(path, token);
+  await checkResponse(response);
+  const blob = await response.blob();
+  if (!blob.type.includes(expectedMime) &&
+      !(expectedMime === "application/zip" && blob.type.includes("octet-stream"))) {
+    throw new Error(`Server did not return a valid ${expectedMime === "application/pdf" ? "PDF" : "ZIP"} file.`);
+  }
+  const url = URL.createObjectURL(blob);
+  try {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+}
+
 export async function downloadForensicReport(
   analysisId: string,
+  token: string,
+  caseId?: string
+): Promise<void> {
+  const query = caseId ? `?case_id=${encodeURIComponent(caseId)}` : "";
+  return saveAuthenticatedDownload(
+    `/api/report/${encodeURIComponent(analysisId)}${query}`,
+    token,
+    `NeuralEdge_${analysisId}.pdf`,
+    "application/pdf"
+  );
+}
+
+export async function downloadCaseReportBundle(
+  caseId: string,
   token: string
 ): Promise<void> {
-  const response = await authenticatedFetch(
-    `/api/report/${encodeURIComponent(analysisId)}`,
-    token
+  return saveAuthenticatedDownload(
+    `/api/cases/${encodeURIComponent(caseId)}/reports.zip`,
+    token,
+    `NeuralEdge_Case_${caseId.slice(0, 8)}.zip`,
+    "application/zip"
   );
+}
 
+export async function getEvidenceThumbnail(
+  evidenceId: string,
+  token: string
+): Promise<string> {
+  const response = await authenticatedFetch(
+    `/api/evidence/${encodeURIComponent(evidenceId)}/thumbnail`, token
+  );
   await checkResponse(response);
-
   const blob = await response.blob();
-
-  if (!blob.type.includes("application/pdf")) {
-    throw new Error("Server did not return a PDF report.");
+  if (!blob.type.startsWith("image/")) {
+    throw new Error("Evidence thumbnail is unavailable.");
   }
-
-  const url = URL.createObjectURL(blob);
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `NeuralEdge_${analysisId}.pdf`;
-
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-
-  window.setTimeout(() => {
-    URL.revokeObjectURL(url);
-  }, 1000);
+  return URL.createObjectURL(blob);
 }
 
 export type InvestigationCase = {
@@ -444,17 +550,59 @@ export async function getAnalysisDetails(
   return (await response.json()) as AnalysisResponse;
 }
 
+export type ExplanationJobStatus = "not_started" | "queued" | "running" | "completed" | "failed" | "cancelled";
+export type ExplanationJob = {
+  id: string | null;
+  analysis_id: string;
+  method: ExplanationMethod;
+  status: ExplanationJobStatus;
+  progress: number;
+  message: string;
+  created_at: string | null;
+  updated_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+/** Start an asynchronous explanation; POST returns promptly with a job record. */
 export async function generateSavedExplanation(
   analysisId: string,
   method: ExplanationMethod,
   token: string
-): Promise<void> {
+): Promise<ExplanationJob> {
   const response = await authenticatedFetch(
     `/api/analyses/${encodeURIComponent(analysisId)}/explain/${method}`,
     token,
     { method: "POST" }
   );
   await checkResponse(response);
+  return (await response.json()) as ExplanationJob;
+}
+
+export async function getExplanationJobStatus(
+  analysisId: string,
+  method: ExplanationMethod,
+  token: string
+): Promise<ExplanationJob> {
+  const response = await authenticatedFetch(
+    `/api/analyses/${encodeURIComponent(analysisId)}/explain/${method}/status`,
+    token
+  );
+  await checkResponse(response);
+  return (await response.json()) as ExplanationJob;
+}
+
+export async function cancelQueuedExplanation(
+  analysisId: string,
+  method: ExplanationMethod,
+  token: string
+): Promise<ExplanationJob> {
+  const response = await authenticatedFetch(
+    `/api/analyses/${encodeURIComponent(analysisId)}/explain/${method}/job`,
+    token, { method: "DELETE" }
+  );
+  await checkResponse(response);
+  return (await response.json()) as ExplanationJob;
 }
 
 // v3 management: typed models and explicitly confirmed deletion.
@@ -525,4 +673,60 @@ export async function permanentlyDeleteCase(
   });
   await checkResponse(response);
   return (await response.json()) as { deleted_case: string; deleted_analyses: number };
+}
+
+
+// Investigator account settings. Endpoints enforce authenticated ownership.
+export type ActiveLoginSession = {
+  id: string; created_at: string; expires_at: string; is_current: boolean;
+};
+export type ResearchMetric = {
+  model: string; n: number; threshold: number; accuracy: number;
+  balanced_accuracy: number; fake_precision: number; fake_recall: number;
+  fake_F1: number; ROC_AUC: number; PR_AUC: number;
+  TN: number; FP: number; FN: number; TP: number;
+};
+export type ResearchSummary = {
+  available: boolean; reason?: string; model_order?: string[];
+  metrics?: ResearchMetric[]; test_count?: number | null;
+  threshold?: number | null; split_counts?: {test?: {Real: number; Fake: number}};
+  research_caveats?: unknown; note?: string;
+};
+
+export async function getModelResearch(token: string): Promise<ResearchSummary> {
+  const response = await authenticatedFetch("/api/model-research", token);
+  await checkResponse(response);
+  return (await response.json()) as ResearchSummary;
+}
+export async function updateInvestigatorProfile(token: string, name: string): Promise<Investigator> {
+  const response = await authenticatedFetch("/api/auth/profile", token, {
+    method: "PATCH", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name}),
+  });
+  await checkResponse(response);
+  return (await response.json()) as Investigator;
+}
+export async function getActiveLoginSessions(token: string): Promise<ActiveLoginSession[]> {
+  const response = await authenticatedFetch("/api/auth/sessions", token);
+  await checkResponse(response);
+  return (await response.json()) as ActiveLoginSession[];
+}
+export async function revokeOtherLoginSessions(token: string): Promise<number> {
+  const response = await authenticatedFetch("/api/auth/sessions/revoke-others", token, {method: "POST"});
+  await checkResponse(response);
+  const data = (await response.json()) as {revoked: number};
+  return data.revoked;
+}
+export async function revokeEveryLoginSession(token: string): Promise<void> {
+  const response = await authenticatedFetch("/api/auth/sessions/revoke-all", token, {method: "POST"});
+  await checkResponse(response);
+  setAccessToken(null);
+}
+export async function updateInvestigatorPassword(token: string, currentPassword: string, newPassword: string): Promise<void> {
+  const response = await authenticatedFetch("/api/auth/password", token, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({current_password: currentPassword, new_password: newPassword}),
+  });
+  await checkResponse(response);
+  setAccessToken(null);
 }

@@ -13,9 +13,13 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
+  Search,
+  FileDown,
+  Archive,
 } from "lucide-react";
 
 import { useAuth } from "@/components/auth/AuthProvider";
+import EvidenceThumbnail from "@/components/EvidenceThumbnail";
 
 import {
   createCase,
@@ -28,6 +32,8 @@ import {
   unlinkAnalysisFromCase,
   permanentlyDeleteAnalysis,
   permanentlyDeleteCase,
+  downloadForensicReport,
+  downloadCaseReportBundle,
   type InvestigationCase,
   type CaseDetails,
   type AnalysisResponse,
@@ -58,6 +64,18 @@ export default function CaseManager() {
   const [editDescription, setEditDescription] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "open" | "closed">("all");
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  const visibleCases = cases.filter((item) => {
+    const matchesStatus = statusFilter === "all" || item.status === statusFilter;
+    const query = search.trim().toLocaleLowerCase();
+    const matchesQuery = !query || [item.title, item.description, item.id]
+      .some((field) => field.toLocaleLowerCase().includes(query));
+    return matchesStatus && matchesQuery;
+  });
+
 
   function notifyHistoryChange() {
     window.dispatchEvent(new Event("neuraledge-data-changed"));
@@ -347,6 +365,32 @@ export default function CaseManager() {
     } finally { setBusy(false); }
   }
 
+  async function handleDownloadPDF(analysisId: string) {
+    if (!token || !selectedCase || downloading) return;
+    setDownloading(analysisId);
+    setError("");
+    setMessage("");
+    try {
+      await downloadForensicReport(analysisId, token, selectedCase.id);
+      setMessage("Option A PDF report downloaded.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to download the PDF.");
+    } finally { setDownloading(null); }
+  }
+
+  async function handleDownloadAllPDFs() {
+    if (!token || !selectedCase || downloading) return;
+    setDownloading("bundle");
+    setError("");
+    setMessage("");
+    try {
+      await downloadCaseReportBundle(selectedCase.id, token);
+      setMessage("ZIP containing the case's forensic PDF reports downloaded.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to download case reports.");
+    } finally { setDownloading(null); }
+  }
+
   function handleRefresh() {
     if (busy) return;
 
@@ -478,6 +522,30 @@ export default function CaseManager() {
           </button>
         </div>
 
+        <div className="mt-6 flex flex-wrap items-end gap-3">
+          <label className="min-w-48 flex-1 text-sm text-slate-300">
+            Search cases
+            <div className="relative mt-2">
+              <Search size={18} className="pointer-events-none absolute left-3 top-3.5 text-slate-400" aria-hidden="true" />
+              <input
+                type="search" value={search} onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search by title, description or case ID"
+                className="w-full rounded-xl border border-white/10 bg-slate-900 py-3 pl-10 pr-4 text-white placeholder:text-slate-500"
+              />
+            </div>
+          </label>
+          <label className="text-sm text-slate-300">
+            Status
+            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as "all" | "open" | "closed")}
+              className="mt-2 block min-w-36 rounded-xl border border-white/10 bg-slate-900 p-3 text-white">
+              <option value="all">All cases</option>
+              <option value="open">Open</option>
+              <option value="closed">Closed</option>
+            </select>
+          </label>
+        </div>
+        {!loading && <p className="mt-3 text-xs text-slate-400" role="status">Showing {visibleCases.length} of {cases.length} cases</p>}
+
         {loading ? (
           <p role="status" className="mt-6 text-slate-400">
             Loading investigation cases...
@@ -486,9 +554,13 @@ export default function CaseManager() {
           <p className="mt-6 text-slate-400">
             No cases created yet.
           </p>
+        ) : visibleCases.length === 0 ? (
+          <p className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5 text-slate-400">
+            No cases match these filters. Try a different search or status.
+          </p>
         ) : (
           <div className="mt-6 space-y-5">
-            {cases.map((item) => (
+            {visibleCases.map((item) => (
               <div
                 key={item.id}
                 className="rounded-2xl border border-white/10 bg-black/20 p-6"
@@ -548,6 +620,19 @@ export default function CaseManager() {
                 {selectedCase?.id === item.id && (
                   <div className="mt-6 space-y-6 border-t border-white/10 pt-6">
 
+                    <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-5">
+                      <div>
+                        <h4 className="font-semibold">Case report export</h4>
+                        <p className="mt-1 text-sm text-slate-400">Download saved analysis reports together (up to 20 PDFs). Open and closed cases are supported.</p>
+                      </div>
+                      <button type="button" onClick={() => void handleDownloadAllPDFs()}
+                        disabled={busy || !!downloading || !selectedCase.analyses.length || selectedCase.analyses.length > 20}
+                        className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/40 bg-cyan-500/10 px-4 py-3 text-sm font-semibold text-cyan-300 disabled:opacity-40">
+                        <Archive size={17} aria-hidden="true" />
+                        {downloading === "bundle" ? "Preparing ZIP..." : "Download Reports (.zip)"}
+                      </button>
+                    </div>
+
                     <form onSubmit={(event) => void handleEditCase(event)} className="space-y-3 rounded-xl bg-white/5 p-5">
                       <h4 className="font-semibold">Edit case details</h4>
                       <label className="block text-sm">Case title
@@ -577,8 +662,10 @@ export default function CaseManager() {
                           >
                             <div className="flex flex-wrap items-center justify-between gap-3">
 
-                              <div>
-                                <p className="font-mono text-xs text-slate-400">
+                              <div className="flex min-w-0 items-start gap-4">
+                                <EvidenceThumbnail evidenceId={analysis.evidence_id} token={token} />
+                                <div className="min-w-0">
+                                <p className="break-all font-mono text-xs text-slate-400">
                                   {analysis.analysis_id}
                                 </p>
 
@@ -590,6 +677,8 @@ export default function CaseManager() {
                                   Confidence:{" "}
                                   {(analysis.confidence * 100).toFixed(2)}%
                                 </p>
+                                <p className="mt-1 text-xs text-slate-500">{new Date(analysis.created_at).toLocaleString()}</p>
+                                </div>
                               </div>
 
                               <span
@@ -603,6 +692,12 @@ export default function CaseManager() {
                               </span>
                             </div>
                             <div className="mt-4 flex flex-wrap gap-3">
+                              <button type="button" disabled={busy || !!downloading}
+                                onClick={() => void handleDownloadPDF(analysis.analysis_id)}
+                                className="inline-flex items-center gap-2 rounded-lg border border-cyan-400/40 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-300 disabled:opacity-50">
+                                <FileDown size={16} aria-hidden="true" />
+                                {downloading === analysis.analysis_id ? "Generating PDF..." : "Download PDF"}
+                              </button>
                               {selectedCase.status === "open" && (
                                 <button type="button" disabled={busy} onClick={() => void handleUnlink(analysis.analysis_id)}
                                   className="rounded-lg border border-slate-400/30 px-3 py-2 text-sm text-slate-200 disabled:opacity-50">

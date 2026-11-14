@@ -8,6 +8,9 @@ import {
   downloadForensicReport,
   getAnalysisDetails,
   getAnalysisImage,
+  getExplanationJobStatus,
+  cancelQueuedExplanation,
+  type ExplanationJob,
   type AnalysisResponse,
   type ExplanationMethod,
 } from "@/services/api";
@@ -38,6 +41,7 @@ export default function AdditionalExplainability({
   const [urls, setUrls] = useState<Record<string, string>>({});
   const urlRegistry = useRef<Record<string, string>>({});
   const [busy, setBusy] = useState<ExplanationMethod | null>(null);
+  const [jobs, setJobs] = useState<Partial<Record<ExplanationMethod, ExplanationJob>>>({});
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
 
@@ -57,6 +61,77 @@ export default function AdditionalExplainability({
     };
   }, [analysisId, token]);
 
+  // Restore queued/running jobs after refresh or navigation to this analysis.
+  useEffect(() => {
+    let cancelled = false;
+    async function restoreJobs() {
+      const statuses = await Promise.allSettled(
+        methods.map(({ key }) => getExplanationJobStatus(analysisId, key, token))
+      );
+      if (cancelled) return;
+      const next: Partial<Record<ExplanationMethod, ExplanationJob>> = {};
+      statuses.forEach((entry, index) => {
+        if (entry.status === "fulfilled") next[methods[index].key] = entry.value;
+      });
+      setJobs(next);
+    }
+    void restoreJobs();
+    return () => { cancelled = true; };
+  }, [analysisId, token]);
+
+  const runningMethods = methods
+    .filter(({ key }) => jobs[key]?.status === "queued" || jobs[key]?.status === "running")
+    .map(({ key }) => key);
+  const runningKey = runningMethods.join(",");
+
+  useEffect(() => {
+    if (!runningKey) return;
+    let cancelled = false;
+    let pending = false;
+    const keys = runningKey.split(",") as ExplanationMethod[];
+    async function poll() {
+      if (pending || cancelled) return;
+      pending = true;
+      try {
+        const statuses = await Promise.allSettled(
+          keys.map((key) => getExplanationJobStatus(analysisId, key, token))
+        );
+        if (cancelled) return;
+        const next: Partial<Record<ExplanationMethod, ExplanationJob>> = {};
+        const completed: ExplanationMethod[] = [];
+        statuses.forEach((entry, index) => {
+          if (entry.status !== "fulfilled") return;
+          const key = keys[index];
+          next[key] = entry.value;
+          if (entry.value.status === "completed") completed.push(key);
+        });
+        setJobs((prior) => ({ ...prior, ...next }));
+        if (completed.length) {
+          const updated = await getAnalysisDetails(analysisId, token);
+          if (!cancelled) {
+            setAnalysis(updated);
+            for (const key of completed) {
+              const asset = updated.assets?.[key];
+              if (!asset || urlRegistry.current[key]) continue;
+              try {
+                const url = await getAnalysisImage(asset.url, token);
+                if (cancelled) URL.revokeObjectURL(url);
+                else rememberUrl(key, url);
+              } catch { /* Manual image-load link remains available. */ }
+            }
+          }
+        }
+      } catch {
+        // Poll failures are transient; keep job state and try again.
+      } finally {
+        pending = false;
+      }
+    }
+    void poll();
+    const timer = window.setInterval(() => void poll(), 3000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [analysisId, token, runningKey]);
+
   useEffect(() => {
     // Release all URLs only when the panel unmounts (not after each update).
     const registry = urlRegistry.current;
@@ -72,23 +147,69 @@ export default function AdditionalExplainability({
     setUrls({ ...urlRegistry.current });
   }
 
+  async function refreshSavedExplanation(method: ExplanationMethod): Promise<boolean> {
+    // The server may have finished a slow explanation after a proxy timeout.
+    // Do not run a second costly explanation until we have checked its record.
+    const updated = await getAnalysisDetails(analysisId, token);
+    setAnalysis(updated);
+    const saved = updated.xai?.[method];
+    if (saved?.status !== "completed") return false;
+    const asset = updated.assets?.[method];
+    if (asset) {
+      try {
+        const url = await getAnalysisImage(asset.url, token);
+        rememberUrl(method, url);
+      } catch {
+        // Explanation metadata can be ready even if its image fetch fails.
+        // The existing "Load saved explanation image" action remains available.
+      }
+    }
+    return true;
+  }
+
   async function generate(method: ExplanationMethod) {
-    if (busy) return;
+    if (busy || jobs[method]?.status === "queued" || jobs[method]?.status === "running") return;
     setBusy(method);
     setError("");
     try {
-      await generateSavedExplanation(analysisId, method, token);
-      const updated = await getAnalysisDetails(analysisId, token);
-      const asset = updated.assets[method];
-      if (asset) {
-        const url = await getAnalysisImage(asset.url, token);
-        rememberUrl(method, url);
-      }
-      setAnalysis(updated);
+      const job = await generateSavedExplanation(analysisId, method, token);
+      setJobs((prior) => ({ ...prior, [method]: job }));
+      if (job.status === "completed") await refreshSavedExplanation(method);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Explanation generation failed.");
+      setError(err instanceof Error ? err.message : "Could not queue explanation.");
     } finally {
       setBusy(null);
+    }
+  }
+
+  async function cancel(method: ExplanationMethod) {
+    setError("");
+    try {
+      const job = await cancelQueuedExplanation(analysisId, method, token);
+      setJobs((prior) => ({ ...prior, [method]: job }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not cancel queued explanation.");
+    }
+  }
+
+  async function checkStatus() {
+    setError("");
+    try {
+      const statuses = await Promise.all(methods.map(({ key }) =>
+        getExplanationJobStatus(analysisId, key, token)));
+      const updated = await getAnalysisDetails(analysisId, token);
+      setAnalysis(updated);
+      const next: Partial<Record<ExplanationMethod, ExplanationJob>> = {};
+      statuses.forEach((job, index) => { next[methods[index].key] = job; });
+      setJobs(next);
+      for (const method of (["gradcam", "lime", "shap"] as const)) {
+        const asset = updated.assets?.[method];
+        if (!asset || urlRegistry.current[method]) continue;
+        try { rememberUrl(method, await getAnalysisImage(asset.url, token)); }
+        catch { /* Keep the manual image load action. */ }
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to check explanation status.");
     }
   }
 
@@ -130,13 +251,32 @@ export default function AdditionalExplainability({
             key={key}
             type="button"
             onClick={() => void generate(key)}
-            disabled={busy !== null || !!analysis?.xai?.[key]}
+            disabled={busy !== null || !!analysis?.xai?.[key] || jobs[key]?.status === "queued" || jobs[key]?.status === "running"}
             className="rounded-xl bg-cyan-600 px-4 py-3 text-sm font-semibold text-white disabled:opacity-50"
           >
-            {busy === key ? `Generating ${key.toUpperCase()}...` : analysis?.xai?.[key] ? `${key.toUpperCase()} ready` : label}
+            {busy === key ? "Starting job..." : jobs[key]?.status === "queued" ? `${key.toUpperCase()} queued` : jobs[key]?.status === "running" ? `${key.toUpperCase()} generating...` : analysis?.xai?.[key] ? `${key.toUpperCase()} ready` : label}
           </button>
         ))}
       </div>
+      {methods.some(({ key }) => jobs[key]?.status === "queued" || jobs[key]?.status === "running" || jobs[key]?.status === "failed") && (
+        <div className="mt-4 space-y-2" aria-live="polite">
+          {methods.filter(({ key }) => jobs[key]?.status === "queued" || jobs[key]?.status === "running" || jobs[key]?.status === "failed").map(({ key }) => {
+            const job = jobs[key]!;
+            return (
+              <div key={`job-${key}`} className="rounded-xl border border-cyan-400/20 bg-slate-950/40 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-cyan-100">{key.toUpperCase()} · {job.status === "queued" ? "Queued" : job.status === "running" ? "Processing" : "Failed"}</p>
+                  {job.status === "queued" && <button type="button" onClick={() => void cancel(key)} className="text-xs text-amber-200 underline">Cancel queued job</button>}
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-800"><div className="h-full bg-cyan-500 transition-all" style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }}/></div>
+                <p className="mt-2 text-xs text-slate-400">{job.message} {job.status === "running" ? "(stage indicator, not precise computational progress)" : ""}</p>
+                {job.status === "failed" && <p className="mt-2 text-xs text-amber-200">You can retry this explanation. Check the backend terminal if it fails again.</p>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {(runningKey || error) && <button type="button" onClick={() => void checkStatus()} className="mt-3 text-sm text-cyan-300 underline">Refresh explanation status</button>}
       <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-5 space-y-2">
         <h3 className="font-semibold">Report readiness</h3>
         <p className="text-sm text-slate-300">
@@ -156,7 +296,16 @@ export default function AdditionalExplainability({
           <Download size={18}/>{downloading ? "Preparing PDF..." : `Download ${completeReady ? "Complete" : "Basic"} PDF`}
         </button>
       </div>
-      {error && <p role="alert" className="mt-4 text-sm text-red-400">{error}</p>}
+      {error && (
+        <div className="mt-4 flex flex-wrap items-center gap-3" role="alert">
+          <p className="text-sm text-red-400">{error}</p>
+          <button type="button" onClick={() => void checkStatus()}
+            disabled={busy !== null}
+            className="rounded-lg border border-cyan-400/40 px-3 py-2 text-sm text-cyan-200 disabled:opacity-50">
+            Check saved explanation status
+          </button>
+        </div>
+      )}
       <div className="mt-6 space-y-6">
         {methods.map(({ key, label }) => {
           const meta = analysis?.xai?.[key];

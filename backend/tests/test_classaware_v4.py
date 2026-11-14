@@ -92,13 +92,15 @@ def test_real_pdf_uses_target_and_places_image_before_interpretation():
                                   lime_png=payload, shap_png=payload)
     text = _pdf_text(pdf)
     assert 'REAL' in text
-    assert 'The AI classified this image as REAL' in text
-    assert 'one clear image area' in text or 'one image area' in text
-    assert 'red segments support' in text.lower()
-    assert text.index('Grad-CAM | Attention heatmap') < text.index('The heatmap shows')
-    assert text.index('LIME | Image puzzle segments') < text.index('The image test') if 'The image test' in text else text.index('LIME | Image puzzle segments') < text.index('This test did not find')
-    assert text.index('SHAP | Contribution balance') < text.index('Compared with a softened')
-    assert 'Technical methodology' in text
+    assert 'The NeuralEdge AI model classified this image as REAL' in text
+    assert 'does not establish' in text or 'not a guarantee' in text
+    # Option A lays out the image and side color key above the saved interpretation.
+    for method in ('GRAD-CAM', 'LIME', 'SHAP'):
+        start = text.index('IMAGE-BY-IMAGE EXPLANATION: ' + method)
+        interpretation = text.index('WHAT NEURALEDGE AI FOUND IN THIS IMAGE', start)
+        assert start < interpretation
+    assert 'TECHNICAL METHODOLOGY AND LIMITATIONS' in text
+    assert 'Supports Real' in text and 'Opposes Real' in text
 
 
 def test_old_real_result_does_not_retarget_legacy_fake_map():
@@ -126,7 +128,11 @@ def test_optional_not_generated_says_not_generated():
     assert 'Run LIME' in text and 'Run SHAP' in text
 
 
-def test_main_passes_saved_prediction_to_explainer():
+def test_background_worker_passes_saved_prediction_to_explainer():
     from pathlib import Path
-    source = (Path(__file__).parent.parent / 'app' / 'main.py').read_text()
-    assert 'target_label=result.get("prediction")' in source
+    backend = Path(__file__).parent.parent / 'app'
+    worker_source = (backend / 'xai_jobs.py').read_text()
+    api_source = (backend / 'main.py').read_text()
+    assert "target_label=result.get('prediction')" in worker_source
+    assert 'worker_loop' in api_source
+    assert 'XAIJobStore' in api_source

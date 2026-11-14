@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import secrets
+import zipfile
 import logging
 import shutil
 import io
@@ -10,10 +12,11 @@ import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from PIL import Image as PILImage, ImageOps
 from pathlib import Path
 
 import time
-from threading import Lock, BoundedSemaphore
+from threading import Lock, BoundedSemaphore, Event, Thread
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, File, Request
@@ -37,11 +40,13 @@ from .schemas import (
     CaseStatusUpdate,
     CaseEdit,
     CaseDeleteConfirm,
+    ProfileUpdate, PasswordUpdate,
 )
 from .inference_v2 import InferenceEngine
 from .report_service import generate_forensic_report
 from .explainability_service import generate_explanation, SUPPORTED_METHODS
 from .inference_v2 import MODEL_ORDER
+from .xai_jobs import XAIJobStore, XAIQueueError, worker_loop
 
 
 def now():
@@ -54,6 +59,47 @@ def create_app(settings: Settings | None = None, engine=None):
     passwords = PasswordHash.recommended()
     dummy_hash = passwords.hash("unused-timing-comparison-password")
     bearer = HTTPBearer(auto_error=False)
+    session_cookie = "neuraledge_session"
+
+    def issue_access_token(user: User, session_id: str) -> Token:
+        issued = datetime.now(timezone.utc)
+        encoded = jwt.encode(
+            {"sub": user.id, "sid": session_id, "iat": issued,
+             "exp": issued + timedelta(minutes=30),
+             "iss": "neuraledge", "aud": "neuraledge-api"},
+            settings.secret, algorithm="HS256",
+        )
+        return Token(access_token=encoded, user=user)
+
+    def set_session_cookie(response: Response, secret: str) -> None:
+        response.set_cookie(
+            key=session_cookie, value=secret, httponly=True,
+            secure=settings.cookie_secure, samesite="lax", path="/api/auth",
+            max_age=settings.remembered_session_days * 86400,
+        )
+        response.headers["Cache-Control"] = "no-store"
+
+    def reject_untrusted_origin(request: Request) -> None:
+        # The browser uses the Next.js same-origin /api rewrite. This check is
+        # defense in depth for state-changing cookie-authenticated endpoints.
+        origin = request.headers.get("origin")
+        if origin and origin not in settings.origins:
+            raise HTTPException(403, "Untrusted request origin.")
+
+    def read_session(request: Request) -> tuple[str, User] | None:
+        raw = request.cookies.get(session_cookie)
+        if not raw or len(raw) > 256:
+            return None
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        with connection(settings) as db:
+            row = db.execute(
+                """SELECT s.id, u.id AS user_id, u.name, u.email
+                   FROM auth_sessions s JOIN users u ON u.id=s.user_id
+                   WHERE s.token_hash=? AND s.expires_at>?""",
+                (digest, now()),
+            ).fetchone()
+        return (row["id"], User(id=row["user_id"], name=row["name"],
+                                email=row["email"])) if row else None
 
     # Guest inference is opt-in. Enable only for a controlled local demo.
     # Public deployment needs edge rate limiting and additional anti-abuse measures.
@@ -61,14 +107,37 @@ def create_app(settings: Settings | None = None, engine=None):
     guest_requests: dict[str, list[float]] = {}
     guest_lock = Lock()
     guest_slot = BoundedSemaphore(1)
-    xai_slot = BoundedSemaphore(1)  # One slow explanation at a time per worker.
+    xai_jobs = XAIJobStore(settings)
+    xai_stop = Event()
+    xai_thread = None
 
     @asynccontextmanager
     async def lifespan(app):
+        nonlocal xai_thread
         initialize(settings)
         (settings.data_dir / "analyses").mkdir(exist_ok=True)
+        xai_jobs.install()
         engine.load()
-        yield
+        # Embedded single worker for local development and single-instance hosting.
+        # Set XAI_WORKER_MODE=external on the API server when starting a dedicated
+        # "python -m app.xai_worker_cli" process against the SAME persistent data_dir.
+        # Never run two workers against a separate/ephemeral filesystem.
+        if os.getenv('XAI_WORKER_MODE', 'embedded').strip().lower() == 'embedded':
+            xai_stop.clear()
+            xai_thread = Thread(
+                target=worker_loop,
+                args=(settings, engine, xai_stop),
+                kwargs={'generator': generate_explanation},
+                daemon=True,
+                name='neuraledge-xai-worker',
+            )
+            xai_thread.start()
+        try:
+            yield
+        finally:
+            xai_stop.set()
+            if xai_thread is not None:
+                xai_thread.join(timeout=2)
 
     app = FastAPI(
         title="NeuralEdge Backend - Stage 2", version="0.2.0", lifespan=lifespan
@@ -78,6 +147,7 @@ def create_app(settings: Settings | None = None, engine=None):
         allow_origins=list(settings.origins),
         allow_methods=["GET", "POST", "PATCH", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=True,
     )
 
     def current_user(
@@ -101,9 +171,14 @@ def create_app(settings: Settings | None = None, engine=None):
             )
         except jwt.InvalidTokenError:
             raise unauthorized
+        if not isinstance(claims.get("sid"), str):
+            raise unauthorized
         with connection(settings) as db:
             row = db.execute(
-                "SELECT id,name,email FROM users WHERE id=?", (claims["sub"],)
+                """SELECT u.id,u.name,u.email FROM users u
+                   JOIN auth_sessions s ON s.user_id=u.id
+                   WHERE u.id=? AND s.id=? AND s.expires_at>?""",
+                (claims["sub"], claims["sid"], now()),
             ).fetchone()
         if not row:
             raise unauthorized
@@ -150,7 +225,8 @@ def create_app(settings: Settings | None = None, engine=None):
         return user
 
     @app.post("/api/auth/login", response_model=Token)
-    def login(body: Login):
+    def login(body: Login, response: Response, request: Request):
+        reject_untrusted_origin(request)
         with connection(settings) as db:
             row = db.execute(
                 "SELECT * FROM users WHERE email=?", (str(body.email).lower(),)
@@ -161,24 +237,50 @@ def create_app(settings: Settings | None = None, engine=None):
         if not row or not valid:
             raise HTTPException(401, "Incorrect email or password.")
         user = User(**dict(row))
-        issued = datetime.now(timezone.utc)
-        token = jwt.encode(
-            {
-                "sub": user.id,
-                "iat": issued,
-                "exp": issued + timedelta(minutes=30),
-                "iss": "neuraledge",
-                "aud": "neuraledge-api",
-            },
-            settings.secret,
-            algorithm="HS256",
-        )
+        session_id = str(uuid4())
+        secret = secrets.token_urlsafe(32)
         with connection(settings) as db:
+            db.execute("DELETE FROM auth_sessions WHERE expires_at<=?", (now(),))
+            db.execute(
+                """INSERT INTO auth_sessions(id,user_id,token_hash,created_at,expires_at)
+                   VALUES(?,?,?,?,?)""",
+                (session_id, user.id, hashlib.sha256(secret.encode()).hexdigest(),
+                 now(), (datetime.now(timezone.utc) +
+                         timedelta(days=settings.remembered_session_days)).isoformat()),
+            )
             db.execute(
                 "INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
                 (user.id, "login", now()),
             )
-        return Token(access_token=token, user=user)
+        set_session_cookie(response, secret)
+        return issue_access_token(user, session_id)
+
+    @app.post("/api/auth/refresh", response_model=Token)
+    def refresh_session(request: Request, response: Response):
+        reject_untrusted_origin(request)
+        session = read_session(request)
+        if not session:
+            raise HTTPException(401, "Session expired. Please log in again.")
+        response.headers["Cache-Control"] = "no-store"
+        return issue_access_token(session[1], session[0])
+
+    @app.post("/api/auth/logout", status_code=204)
+    def logout_session(request: Request, response: Response):
+        reject_untrusted_origin(request)
+        session = read_session(request)
+        if session:
+            with connection(settings) as db:
+                db.execute("DELETE FROM auth_sessions WHERE id=?", (session[0],))
+                db.execute(
+                    "INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                    (session[1].id, "logout", now()),
+                )
+        response.delete_cookie(key=session_cookie, path="/api/auth",
+                               secure=settings.cookie_secure, httponly=True,
+                               samesite="lax")
+        response.headers["Cache-Control"] = "no-store"
+        response.status_code = 204
+        return response
 
     @app.get("/api/model-info")
     def model_info(user: User = Depends(current_user)):
@@ -200,6 +302,130 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/api/auth/me", response_model=User)
     def me(user: User = Depends(current_user)):
         return user
+
+    def access_session_id(request: Request, user: User) -> str:
+        # current_user already authenticated the exact bearer token and checked
+        # its session against the database. Decode once more only to read sid.
+        bearer_value = request.headers.get("authorization", "")
+        if not bearer_value.lower().startswith("bearer "):
+            raise HTTPException(401, "Missing access credentials.")
+        try:
+            claims = jwt.decode(
+                bearer_value[7:].strip(), settings.secret, algorithms=["HS256"],
+                issuer="neuraledge", audience="neuraledge-api",
+                options={"require": ["sub", "sid", "exp", "iat", "iss", "aud"]},
+            )
+        except jwt.InvalidTokenError:
+            raise HTTPException(401, "Invalid access credentials.")
+        if claims.get("sub") != user.id or not isinstance(claims.get("sid"), str):
+            raise HTTPException(401, "Invalid session ownership.")
+        return claims["sid"]
+
+    @app.patch("/api/auth/profile", response_model=User)
+    def update_profile(body: ProfileUpdate, user: User = Depends(current_user)):
+        name = body.name.strip()
+        if len(name) < 2:
+            raise HTTPException(422, "Please enter a name of at least two characters.")
+        with connection(settings) as db:
+            db.execute("UPDATE users SET name=? WHERE id=?", (name, user.id))
+            db.execute("INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                       (user.id, "profile_updated", now()))
+        return User(id=user.id, name=name, email=user.email)
+
+    @app.get("/api/auth/sessions")
+    def active_sessions(request: Request, user: User = Depends(current_user)):
+        current_sid = access_session_id(request, user)
+        with connection(settings) as db:
+            rows = db.execute(
+                """SELECT id, created_at, expires_at FROM auth_sessions
+                   WHERE user_id=? AND expires_at>? ORDER BY created_at DESC""",
+                (user.id, now()),
+            ).fetchall()
+        return [{"id": r["id"], "created_at": r["created_at"],
+                 "expires_at": r["expires_at"], "is_current": r["id"] == current_sid}
+                for r in rows]
+
+    @app.post("/api/auth/sessions/revoke-others")
+    def revoke_other_sessions(request: Request, user: User = Depends(current_user)):
+        sid = access_session_id(request, user)
+        with connection(settings) as db:
+            cur = db.execute("DELETE FROM auth_sessions WHERE user_id=? AND id<>?",
+                             (user.id, sid))
+            db.execute("INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                       (user.id, "revoke_other_sessions", now()))
+        return {"revoked": cur.rowcount}
+
+    @app.post("/api/auth/sessions/revoke-all", status_code=204)
+    def revoke_all_sessions(request: Request, response: Response,
+                            user: User = Depends(current_user)):
+        access_session_id(request, user)
+        with connection(settings) as db:
+            db.execute("DELETE FROM auth_sessions WHERE user_id=?", (user.id,))
+            db.execute("INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                       (user.id, "revoke_all_sessions", now()))
+        response.delete_cookie(key=session_cookie, path="/api/auth",
+                               secure=settings.cookie_secure, httponly=True,
+                               samesite="lax")
+        response.headers["Cache-Control"] = "no-store"
+        response.status_code = 204
+        return response
+
+    @app.post("/api/auth/password", status_code=204)
+    def change_password(body: PasswordUpdate, request: Request, response: Response,
+                        user: User = Depends(current_user)):
+        access_session_id(request, user)
+        with connection(settings) as db:
+            row = db.execute("SELECT password_hash FROM users WHERE id=?", (user.id,)).fetchone()
+            if not row or not passwords.verify(body.current_password, row["password_hash"]):
+                raise HTTPException(400, "Current password is incorrect.")
+            if body.current_password == body.new_password:
+                raise HTTPException(422, "Choose a different new password.")
+            password_hash = passwords.hash(body.new_password)
+            db.execute("UPDATE users SET password_hash=? WHERE id=?", (password_hash, user.id))
+            # Changing a password ends *all* sessions, including this one.
+            db.execute("DELETE FROM auth_sessions WHERE user_id=?", (user.id,))
+            db.execute("INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                       (user.id, "password_changed", now()))
+        response.delete_cookie(key=session_cookie, path="/api/auth",
+                               secure=settings.cookie_secure, httponly=True,
+                               samesite="lax")
+        response.headers["Cache-Control"] = "no-store"
+        response.status_code = 204
+        return response
+
+    @app.get("/api/model-research")
+    def model_research(user: User = Depends(current_user)):
+        # Read-only, deployment-bundle-owned metrics: never mix in scores from
+        # an older notebook or another threshold/model configuration.
+        try:
+            manifest = json.loads(settings.model_manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {"available": False, "reason": "Active deployment does not contain a research metrics record."}
+        records = manifest.get("test_set_metrics")
+        order = manifest.get("model_order") or []
+        if not isinstance(records, list) or not isinstance(order, list):
+            return {"available": False, "reason": "Matching research metrics were not bundled with the active models."}
+        valid_models = set(order) | {"Stacking_TTA", "SoftVote_TTA"}
+        filtered = []
+        for entry in records:
+            if not isinstance(entry, dict) or entry.get("model") not in valid_models:
+                continue
+            try:
+                if abs(float(entry.get("threshold")) - float(manifest.get("operating_threshold"))) > 1e-8:
+                    continue
+                metrics = {key: entry[key] for key in (
+                    "model", "n", "threshold", "accuracy", "balanced_accuracy",
+                    "fake_precision", "fake_recall", "fake_F1", "ROC_AUC", "PR_AUC",
+                    "TN", "FP", "FN", "TP") if key in entry}
+                filtered.append(metrics)
+            except (TypeError, ValueError):
+                continue
+        return {"available": bool(filtered), "model_order": order, "metrics": filtered,
+                "test_count": next((r.get("n") for r in filtered if r.get("model") == "Stacking_TTA"), None),
+                "threshold": manifest.get("operating_threshold"),
+                "split_counts": manifest.get("split_counts"),
+                "research_caveats": manifest.get("research_caveats"),
+                "note": "Internal held-out Kaggle research results, not live website accuracy. Robustness must be evaluated separately."}
 
     @app.post("/api/evidence", response_model=Evidence, status_code=201)
     def upload(file: UploadFile, user: User = Depends(current_user)):
@@ -270,6 +496,27 @@ def create_app(settings: Settings | None = None, engine=None):
     @app.get("/api/evidence/{evidence_id}", response_model=Evidence)
     def evidence(evidence_id: str, user: User = Depends(current_user)):
         return owned_evidence(evidence_id, user)
+
+    @app.get("/api/evidence/{evidence_id}/thumbnail")
+    def evidence_thumbnail(evidence_id: str, user: User = Depends(current_user)):
+        record = owned_evidence(evidence_id, user)
+        try:
+            data = (settings.data_dir / "uploads" / record["id"]).read_bytes()
+        except FileNotFoundError:
+            raise HTTPException(410, "Original evidence is missing.")
+        if hashlib.sha256(data).hexdigest() != record["sha256"]:
+            raise HTTPException(409, "Evidence integrity check failed.")
+        try:
+            with PILImage.open(io.BytesIO(data)) as source:
+                small = ImageOps.exif_transpose(source).convert("RGB")
+                small.thumbnail((200, 200), PILImage.Resampling.LANCZOS)
+                output = io.BytesIO()
+                small.save(output, format="JPEG", quality=78, optimize=True)
+        except (OSError, ValueError):
+            raise HTTPException(422, "Evidence cannot be previewed.")
+        return Response(content=output.getvalue(), media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store",
+                                 "X-Content-Type-Options": "nosniff"})
 
     @app.get("/api/evidence/{evidence_id}/image")
     def original(evidence_id: str, user: User = Depends(current_user)):
@@ -397,100 +644,79 @@ def create_app(settings: Settings | None = None, engine=None):
     def get_analysis(analysis_id: str, user: User = Depends(current_user)):
         return analysis_record(analysis_id, user)
 
-    @app.post("/api/analyses/{analysis_id}/explain/{method}")
-    def generate_saved_explanation(
-        analysis_id: str,
-        method: str,
-        user: User = Depends(current_user),
-    ):
-        """Generate an OPTIONAL explanation only for the owning investigator.
-
-        Prototype endpoint is synchronous. For public deployment replace with
-        a persistent job queue and quota-aware worker. Guest users cannot call it.
-        """
+    def validate_explanation_request(analysis_id: str, method: str, user: User):
         if method not in SUPPORTED_METHODS:
-            raise HTTPException(404, "Unknown explanation method.")
+            raise HTTPException(404, 'Unknown explanation method.')
         result = analysis_record(analysis_id, user)
-        if not engine.ready or not hasattr(engine, "predict_proba_from_face_crops"):
-            raise HTTPException(503, "Four-model inference is not ready.")
-        if (result.get("model") != "FourModelStacking" or
-                result.get("model_version") != getattr(engine, "model_version", None)):
-            raise HTTPException(
-                409,
-                "This analysis was generated by a different model version. "
-                "Reanalyze the original image with the current model first.",
-            )
+        if not engine.ready or not hasattr(engine, 'predict_proba_from_face_crops'):
+            raise HTTPException(503, 'Four-model inference is not ready.')
+        if (result.get('model') != 'FourModelStacking' or
+                result.get('model_version') != getattr(engine, 'model_version', None)):
+            raise HTTPException(409, 'Analysis uses another model version. Reanalyze with the current model.')
+        return result
 
-        # Avoid unnecessary expensive regeneration of explanations.
-        existing = result.get("xai", {}).get(method)
+    def completed_job_response(analysis_id, method, result):
+        existing = result.get('xai', {}).get(method)
+        if not existing:
+            return None
+        asset = result.get('assets', {}).get(method)
+        if asset:
+            path = settings.data_dir / 'analyses' / analysis_id / f'{method}.png'
+            if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != asset['sha256']:
+                raise HTTPException(409, 'Saved explanation failed integrity verification.')
+        return {
+            'id': None, 'analysis_id': analysis_id, 'method': method,
+            'status': 'completed', 'progress': 100, 'message': 'Explanation already saved',
+            'created_at': existing.get('created_at'), 'updated_at': existing.get('created_at'),
+            'started_at': None, 'finished_at': existing.get('created_at'),
+        }
+
+    @app.post('/api/analyses/{analysis_id}/explain/{method}', status_code=202)
+    def enqueue_saved_explanation(
+        analysis_id: str, method: str, user: User = Depends(current_user),
+    ):
+        """Enqueue in milliseconds; never keep an HTTP connection open for XAI."""
+        result = validate_explanation_request(analysis_id, method, user)
+        existing = completed_job_response(analysis_id, method, result)
         if existing:
-            asset = result.get("assets", {}).get(method)
-            if asset:
-                asset_path = settings.data_dir / "analyses" / analysis_id / f"{method}.png"
-                if not asset_path.is_file() or hashlib.sha256(asset_path.read_bytes()).hexdigest() != asset["sha256"]:
-                    raise HTTPException(409, "Previously generated explanation failed integrity verification.")
-            return {"analysis_id": analysis_id, "method": method, "explanation": existing, "asset": asset}
-
-        # Only one slow request per worker. Not a distributed/global rate limiter.
-        if not xai_slot.acquire(blocking=False):
-            raise HTTPException(503, "Another explanation is running. Retry after it completes.")
+            return existing
         try:
-            evidence = owned_evidence(result["evidence_id"], user)
-            try:
-                original = (settings.data_dir / "uploads" / evidence["id"]).read_bytes()
-            except FileNotFoundError:
-                raise HTTPException(410, "Original evidence is missing.")
-            original_hash = hashlib.sha256(original).hexdigest()
-            if (original_hash != evidence["sha256"] or
-                    original_hash != result["image_sha256"]):
-                raise HTTPException(409, "Original evidence failed SHA-256 verification.")
+            return xai_jobs.enqueue(user.id, analysis_id, method)
+        except XAIQueueError as exc:
+            raise HTTPException(exc.status, exc.detail)
 
-            landmarker_task = os.getenv("FACE_LANDMARKER_TASK")
-            try:
-                image_png, meta = generate_explanation(
-                    engine, original, method, landmarker_task=landmarker_task, target_label=result.get("prediction"),
-                )
-            except Exception:
-                logging.getLogger(__name__).exception("XAI generation failed: %s", method)
-                raise HTTPException(503, "Unable to generate this explanation. Check backend logs.")
-            meta["created_at"] = now()
-            folder = settings.data_dir / "analyses" / analysis_id
-            asset = None
-            if image_png is not None:
-                asset = {
-                    "url": f"/api/analyses/{analysis_id}/{method}",
-                    "sha256": hashlib.sha256(image_png).hexdigest(),
-                }
-                # Each explanation is immutable; write only the first time.
-                try:
-                    with (folder / f"{method}.png").open("xb") as output:
-                        output.write(image_png)
-                except FileExistsError:
-                    raise HTTPException(409, "An explanation file already exists; verify before retrying.")
+    @app.get('/api/analyses/{analysis_id}/explain/{method}/status')
+    def explanation_job_status(
+        analysis_id: str, method: str, user: User = Depends(current_user),
+    ):
+        # Ownership is verified on EVERY status poll; never expose other users' jobs.
+        if method not in SUPPORTED_METHODS:
+            raise HTTPException(404, 'Unknown explanation method.')
+        result = analysis_record(analysis_id, user)
+        ready = completed_job_response(analysis_id, method, result)
+        if ready:
+            return ready
+        stored = xai_jobs.read(user.id, analysis_id, method)
+        if stored:
+            return stored
+        return {
+            'id': None, 'analysis_id': analysis_id, 'method': method,
+            'status': 'not_started', 'progress': 0, 'message': 'Not generated',
+            'created_at': None, 'updated_at': None,
+            'started_at': None, 'finished_at': None,
+        }
 
-            # Preserve existing analysis fields and any other explanation methods.
-            with connection(settings) as db:
-                row = db.execute(
-                    "SELECT result_json FROM analyses WHERE id=? AND user_id=?",
-                    (analysis_id, user.id),
-                ).fetchone()
-                if row is None:
-                    raise HTTPException(404, "Analysis not found.")
-                stored = json.loads(row["result_json"])
-                stored.setdefault("xai", {})[method] = meta
-                if asset:
-                    stored.setdefault("assets", {})[method] = asset
-                db.execute(
-                    "UPDATE analyses SET result_json=? WHERE id=? AND user_id=?",
-                    (json.dumps(stored, allow_nan=False), analysis_id, user.id),
-                )
-                db.execute(
-                    "INSERT INTO audit_events(user_id,action,evidence_id,created_at) VALUES (?,?,?,?)",
-                    (user.id, f"explain_{method}", evidence["id"], now()),
-                )
-            return {"analysis_id": analysis_id, "method": method, "explanation": meta, "asset": asset}
-        finally:
-            xai_slot.release()
+    @app.delete('/api/analyses/{analysis_id}/explain/{method}/job')
+    def cancel_queued_explanation(
+        analysis_id: str, method: str, user: User = Depends(current_user),
+    ):
+        if method not in SUPPORTED_METHODS:
+            raise HTTPException(404, 'Unknown explanation method.')
+        analysis_record(analysis_id, user)
+        try:
+            return xai_jobs.cancel(user.id, analysis_id, method)
+        except XAIQueueError as exc:
+            raise HTTPException(exc.status, exc.detail)
 
     @app.get("/api/analyses/{analysis_id}/{asset}")
     def explanation_asset(
@@ -516,13 +742,23 @@ def create_app(settings: Settings | None = None, engine=None):
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
-    @app.get("/api/report/{analysis_id}")
-    def download_report(
-        analysis_id: str,
-        user: User = Depends(current_user),
-    ):
-        # Check that this analysis belongs to the logged-in user.
+    def build_forensic_report(analysis_id: str, user: User,
+                              case_id: str | None = None) -> tuple[bytes, str]:
+        # Verify ownership of this analysis and, optionally, its case membership.
         result = analysis_record(analysis_id, user)
+        if case_id is not None:
+            with connection(settings) as db:
+                linked = db.execute(
+                    """SELECT c.title FROM cases c
+                       JOIN case_analyses ca ON ca.case_id=c.id
+                       WHERE c.id=? AND c.user_id=? AND ca.analysis_id=?""",
+                    (case_id, user.id, analysis_id),
+                ).fetchone()
+            if linked is None:
+                raise HTTPException(404, "Analysis is not attached to this case.")
+            case_title = linked["title"]
+        else:
+            case_title = None
 
         # Obtain the associated evidence with the same ownership check.
         evidence = owned_evidence(result["evidence_id"], user)
@@ -594,6 +830,7 @@ def create_app(settings: Settings | None = None, engine=None):
                 overlay,
                 lime_png=optional_explanations["lime"],
                 shap_png=optional_explanations["shap"],
+                case_title=case_title,
             )
         except Exception:
             logging.getLogger(__name__).exception("Report generation failed")
@@ -602,29 +839,62 @@ def create_app(settings: Settings | None = None, engine=None):
                 "Unable to generate forensic report.",
             )
 
+        return pdf_bytes, evidence["id"]
+
+    @app.get("/api/report/{analysis_id}")
+    def download_report(analysis_id: str, case_id: str | None = None,
+                        user: User = Depends(current_user)):
+        pdf_bytes, evidence_id = build_forensic_report(analysis_id, user, case_id)
         with connection(settings) as db:
             db.execute(
-                """
-                INSERT INTO audit_events
-                (user_id, action, evidence_id, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    user.id,
-                    "generate_report",
-                    evidence["id"],
-                    now(),
-                ),
+                "INSERT INTO audit_events(user_id,action,evidence_id,created_at) VALUES (?,?,?,?)",
+                (user.id, "generate_report", evidence_id, now()),
             )
-
         return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'attachment; filename="NeuralEdge_{analysis_id}.pdf"',
-                "Cache-Control": "no-store",
-                "X-Content-Type-Options": "nosniff",
-            },
+            content=pdf_bytes, media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="NeuralEdge_{analysis_id}.pdf"',
+                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.get("/api/cases/{case_id}/reports.zip")
+    def download_case_reports(case_id: str, user: User = Depends(current_user)):
+        with connection(settings) as db:
+            case = db.execute(
+                "SELECT id,title FROM cases WHERE id=? AND user_id=?", (case_id, user.id)
+            ).fetchone()
+            if not case:
+                raise HTTPException(404, "Case not found.")
+            rows = db.execute(
+                """SELECT a.id FROM case_analyses ca
+                   JOIN analyses a ON a.id=ca.analysis_id
+                   WHERE ca.case_id=? AND a.user_id=?
+                   ORDER BY ca.created_at DESC, a.id DESC""",
+                (case_id, user.id),
+            ).fetchall()
+        if not rows:
+            raise HTTPException(409, "This case has no attached analyses to export.")
+        if len(rows) > 20:
+            raise HTTPException(413, "Bulk export supports at most 20 reports per ZIP.")
+        content = io.BytesIO()
+        # Generate each PDF through the exact same integrity-checked report path.
+        with zipfile.ZipFile(content, "w", compression=zipfile.ZIP_DEFLATED,
+                             compresslevel=6) as bundle:
+            for row in rows:
+                report, _ = build_forensic_report(row["id"], user, case_id)
+                if len(report) > 15 * 1024 * 1024 or content.tell() > 80 * 1024 * 1024:
+                    raise HTTPException(413, "Case report export is too large. Download PDFs individually.")
+                bundle.writestr(f"NeuralEdge_{row['id']}.pdf", report)
+        if content.tell() > 80 * 1024 * 1024:
+            raise HTTPException(413, "Case report ZIP is too large.")
+        with connection(settings) as db:
+            db.execute(
+                "INSERT INTO audit_events(user_id,action,created_at) VALUES (?,?,?)",
+                (user.id, "export_case_reports", now()),
+            )
+        return Response(
+            content=content.getvalue(), media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="NeuralEdge_Case_{case_id[:8]}.zip"',
+                     "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
         )
 
     # ---------------------------------------------------
@@ -913,6 +1183,19 @@ def create_app(settings: Settings | None = None, engine=None):
                     ).fetchone()
                     if row is None:
                         raise HTTPException(404, "Analysis not found.")
+                if analysis_ids:
+                    placeholders = ",".join("?" for _ in analysis_ids)
+                    active = db.execute(
+                        "SELECT analysis_id FROM xai_jobs "
+                        f"WHERE analysis_id IN ({placeholders}) "
+                        "AND status IN ('queued','running') LIMIT 1",
+                        tuple(analysis_ids),
+                    ).fetchone()
+                    if active:
+                        raise HTTPException(
+                            409, "An explanation job is queued or running. "
+                                 "Wait for completion or cancel the queued job before deletion."
+                        )
                 if case_id is not None and analysis_ids:
                     placeholders = ",".join("?" for _ in analysis_ids)
                     query = (

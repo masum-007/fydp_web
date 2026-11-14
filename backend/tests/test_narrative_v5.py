@@ -60,26 +60,20 @@ def test_fake_report_explains_saved_mouth_nose_and_model_score():
     assert '92.8%' in t
     assert 'mouth' in t and 'nose' in t
     assert 'The networks gave mixed Fake-category scores' not in t
-    assert 'What this image tells us' in t
-    assert 'Combined interpretation' in t
-    assert 'The AI classified this image as FAKE' in t
-    assert 'not verified edits' in t
+    assert 'WHAT NEURALEDGE AI FOUND IN THIS IMAGE' in t
+    assert 'COMBINED INTERPRETATION' in t
+    assert 'The NeuralEdge AI model classified this image as FAKE' in t
+    assert 'not verified image edits' in t or 'not a verified image edit' in t
 
 
-def test_picture_findings_appear_before_color_side_note():
+def test_option_a_puts_explanation_below_figure_and_method_note_after_text():
     t = _text(_pdf(_fake()))
-    i = t.index('Grad-CAM | Attention heatmap')
-    j = t.index('What this image tells us', i)
-    k = t.index('How to read:', i)
-    assert i < j < k
-    li = t.index('LIME | Image puzzle segments')
-    lj = t.index('What this image tells us', li)
-    lk = t.index('How to read:', li)
-    assert li < lj < lk
-    si = t.index('SHAP | Contribution balance')
-    sj = t.index('What this image tells us', si)
-    sk = t.index('How to read:', si)
-    assert si < sj < sk
+    for method in ('GRAD-CAM', 'LIME', 'SHAP'):
+        i = t.index('IMAGE-BY-IMAGE EXPLANATION: ' + method)
+        color = t.index('COLOR READING GUIDE', i)
+        finding = t.index('WHAT NEURALEDGE AI FOUND IN THIS IMAGE', i)
+        assert i < color < finding
+    assert t.index('TECHNICAL METHODOLOGY AND LIMITATIONS') > t.index('WHAT NEURALEDGE AI FOUND IN THIS IMAGE')
 
 
 def test_real_classification_explanation_distinguishes_screening_and_authentication():

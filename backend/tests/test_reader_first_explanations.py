@@ -38,18 +38,18 @@ def _case(label='Fake', fake=.54916643):
 
 def test_fake_user_text_leads_with_result_and_near_threshold():
     text=reader_overall_explanation(_case())
-    assert text.startswith('The AI classified this image as FAKE')
+    assert text.startswith('The NeuralEdge AI model classified this image as FAKE')
     assert '54.9%' in text and '50.0%' in text
     assert 'close to the decision cutoff' in text
-    assert 'areas around the face and head' in text
+    assert 'lower part of the portrait near the neck or clothing' in text
 
 
 def test_real_user_text_never_authenticates_image():
     text=reader_overall_explanation(_case('Real',.28))
-    assert text.startswith('The AI classified this image as REAL')
-    assert 'does not verify' in text
+    assert text.startswith('The NeuralEdge AI model classified this image as REAL')
+    assert 'does not establish' in text
     explanation=reader_method_explanation('lime',_case('Real',.28))
-    assert 'toward Real' in explanation
+    assert 'supporting the NeuralEdge AI model\'s Real classification' in explanation
     assert 'person\'s left cheek' in explanation
 
 
@@ -65,7 +65,7 @@ def test_missing_regions_do_not_invent_diagnosis():
     r=_case()
     r['xai']['gradcam']['interpretation']['regions']={'supporting':[]}
     text=reader_method_explanation('gradcam',r)
-    assert 'did not single out' in text
+    assert 'did not identify one clearly named area' in text
     assert 'edited mouth' not in text
 
 
@@ -75,11 +75,11 @@ def test_pdf_reader_first_and_cautions_after():
     assert pdf.startswith(b'%PDF')
     with pymupdf.open(stream=pdf,filetype='pdf') as doc:
         text='\n'.join(page.get_text() for page in doc)
-    assert 'The AI classified this image as FAKE' in text
+    assert 'The NeuralEdge AI model classified this image as FAKE' in text
     assert '54.9%' in text
     assert 'neck or clothing' in text
-    assert 'Technical methodology and limitations' in text
-    assert text.index('The AI classified this image as FAKE') < text.index('Technical methodology and limitations')
+    assert 'TECHNICAL METHODOLOGY AND LIMITATIONS' in text
+    assert text.index('The NeuralEdge AI model classified this image as FAKE') < text.index('TECHNICAL METHODOLOGY AND LIMITATIONS')
     assert 'This is a Fake-category map of the four CNNs' not in text
 
 
