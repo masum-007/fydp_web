@@ -62,8 +62,8 @@ def test_fake_report_explains_saved_mouth_nose_and_model_score():
     assert 'The networks gave mixed Fake-category scores' not in t
     assert 'What this image tells us' in t
     assert 'Combined interpretation' in t
-    assert 'not a pixel-level diagnosis' in t
-    assert 'were physically forged' in t
+    assert 'The AI classified this image as FAKE' in t
+    assert 'not verified edits' in t
 
 
 def test_picture_findings_appear_before_color_side_note():

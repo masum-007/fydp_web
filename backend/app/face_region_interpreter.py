@@ -269,24 +269,23 @@ def summarize_xai_regions(crop_rgb, landmarker_task_path, *, gradcam_fake=None,
         metrics[method] = {"supporting": positive, "opposing": negative}
         if not support:
             narratives[method] = (
-                f"{method} showed distributed or weak {target}-target attribution; "
-                "no particular image region was localized reliably."
+                f"The image explanation for {target} did not single out one clear "
+                "face area; several parts of the image may have contributed."
             )
         elif method == "Grad-CAM":
             narratives[method] = (
-                f"For the {target}-category output, Grad-CAM showed stronger CNN activation "
-                f"around {_joined(support)}. These locations indicate a model response, "
-                "not confirmed editing."
+                f"While checking for {target}, the image models focused more on "
+                f"{_joined(support)}. The warmer parts of the picture show the "
+                "strongest focus."
             )
         else:
             narratives[method] = (
-                f"For the {target}-category output, {method} attributed positive "
-                f"contribution to {_joined(support)}. This is not a finding "
-                "that those regions were digitally altered."
+                f"Details around {_joined(support)} helped move the AI assessment "
+                f"toward {target} in this {method} explanation."
             )
         if oppose:
             narratives[method] += (
-                f" Opposing attribution was concentrated around {_joined(oppose)}."
+                f" Details around {_joined(oppose)} pushed in the other direction."
             )
     comparison = None
     if gradcam_members:

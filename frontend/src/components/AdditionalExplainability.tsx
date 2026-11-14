@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Download, Flame, Puzzle, Scale } from "lucide-react";
+import { methodInPlainLanguage, methodReadingNote, resultInPlainLanguage } from "@/utils/xaiReaderCopy";
 import {
   generateSavedExplanation,
   downloadForensicReport,
@@ -112,12 +113,17 @@ export default function AdditionalExplainability({
 
   return (
     <section className="rounded-3xl border border-white/10 bg-white/5 p-8">
-      <h2 className="text-2xl font-bold">Additional AI Explanations</h2>
+      <h2 className="text-2xl font-bold">NeuralEdge AI Image Explanations</h2>
       <p className="mt-3 text-sm text-slate-400">
-        Explanations are generated for this specific evidence, on demand. New analyses
-        explain the predicted Real or Fake category. Colored regions indicate model
-        influence, not confirmed image manipulation.
+        See how the NeuralEdge AI model classified this picture and which image areas contributed to its assessment.
+        You can request more detailed explanation pictures below.
       </p>
+      {analysis && (
+        <div className="mt-5 rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-4">
+          <p className="text-sm font-semibold text-cyan-200">Why NeuralEdge AI reached this result</p>
+          <p className="mt-2 text-sm leading-6 text-slate-100">{resultInPlainLanguage(analysis)}</p>
+        </div>
+      )}
       <div className="mt-6 flex flex-wrap gap-3">
         {methods.map(({ key, label }) => (
           <button
@@ -165,7 +171,9 @@ export default function AdditionalExplainability({
           return (
             <article key={key} className="rounded-2xl border border-white/10 bg-black/20 p-5">
               <h3 className="flex items-center gap-2 font-semibold"><MethodIcon size={18} /> {label.replace("Generate ", "")}</h3>
-              <p className="mt-2 text-sm text-slate-400">{explanationNote}</p>
+              <p className="mt-2 text-sm text-slate-300">
+                {key === "gradcam" ? "Where the image models were most responsive" : key === "lime" ? "Which sections helped or opposed the result" : "Which details supported or opposed the result"}
+              </p>
               {legacy && (
                 <p className="mt-2 text-sm text-amber-200">
                   This is a saved {target}-target explanation, not a {predictedClass}-target map.
@@ -182,10 +190,18 @@ export default function AdditionalExplainability({
                   className="mt-4 max-h-80 max-w-full rounded-xl"
                 />
               )}
-              <p className="mt-3 text-sm text-cyan-200">
-                {meta.interpretation.narrative}
+              <p className="mt-3 text-sm leading-6 text-cyan-100">
+                {methodInPlainLanguage(key, meta, predictedClass)}
               </p>
-              <p className="mt-3 text-xs text-slate-400">{meta.note}</p>
+              <details className="mt-4 rounded-lg border border-white/10 p-3 text-xs text-slate-400">
+                <summary className="cursor-pointer font-semibold text-slate-300">Color guide and technical notes</summary>
+                <p className="mt-2">{explanationNote}</p>
+                <p className="mt-2">{methodReadingNote(key)}</p>
+                {meta.interpretation?.narrative && (
+                  <p className="mt-2">Saved research description: {meta.interpretation.narrative}</p>
+                )}
+                {meta.note && <p className="mt-2">{meta.note}</p>}
+              </details>
               {analysis?.assets?.[key] && !urls[key] && (
                 <button
                   type="button"

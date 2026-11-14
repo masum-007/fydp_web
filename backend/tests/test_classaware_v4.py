@@ -92,13 +92,12 @@ def test_real_pdf_uses_target_and_places_image_before_interpretation():
                                   lime_png=payload, shap_png=payload)
     text = _pdf_text(pdf)
     assert 'REAL' in text
-    assert 'Real-category' in text
-    assert 'LIME contributed to Real' in text
-    assert 'SHAP contributed to Real' in text
+    assert 'The AI classified this image as REAL' in text
+    assert 'one clear image area' in text or 'one image area' in text
     assert 'red segments support' in text.lower()
-    assert text.index('Grad-CAM | Attention heatmap') < text.index('Grad-CAM focused on')
-    assert text.index('LIME | Image puzzle segments') < text.index('LIME contributed to Real')
-    assert text.index('SHAP | Contribution balance') < text.index('SHAP contributed to Real')
+    assert text.index('Grad-CAM | Attention heatmap') < text.index('The heatmap shows')
+    assert text.index('LIME | Image puzzle segments') < text.index('The image test') if 'The image test' in text else text.index('LIME | Image puzzle segments') < text.index('This test did not find')
+    assert text.index('SHAP | Contribution balance') < text.index('Compared with a softened')
     assert 'Technical methodology' in text
 
 
@@ -111,7 +110,7 @@ def test_old_real_result_does_not_retarget_legacy_fake_map():
     text = _pdf_text(pdf)
     assert 'Legacy explanation' in text
     assert 'not the screening label' in text
-    assert 'LIME contributed to Fake' in text
+    assert 'earlier Fake result' in text
     assert 'Reanalyze the image' in text
 
 

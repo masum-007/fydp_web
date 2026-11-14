@@ -1,0 +1,59 @@
+# ==========================================
+# NeuralEdge AI - GitHub Exclusions
+# ==========================================
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+.venv-v2/
+.venv-legacy/
+venv/
+
+# Python caches
+__pycache__/
+.pytest_cache/
+*.pyc
+*.pyo
+
+# Trained ML model files
+*.keras
+*.h5
+*.hdf5
+*.joblib
+
+# Local deployment model folders
+backend/artifacts/
+backend/artifacts_v2/
+
+# Investigation data and databases
+backend/storage/
+*.db
+*.sqlite
+*.sqlite3
+
+# MediaPipe model asset
+backend/assets/face_landmarker.task
+
+# Generated test outputs
+backend/v2-smoke-results/
+
+# Frontend dependencies and builds
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# Logs and temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Local editor and testing files
+.coverage
+htmlcov/

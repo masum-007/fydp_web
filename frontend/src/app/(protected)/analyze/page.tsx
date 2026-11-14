@@ -1,5 +1,6 @@
-
 "use client";
+
+import { resultInPlainLanguage } from "@/utils/xaiReaderCopy";
 
 import { useEffect, useState } from "react";
 
@@ -194,7 +195,7 @@ export default function Analyze() {
               <div className="mt-8 grid gap-4 md:grid-cols-3">
 
                 <Metric
-                  label="Confidence"
+                  label="Selected-category model score"
                   value={`${(result.confidence * 100).toFixed(2)}%`}
                 />
 
@@ -222,12 +223,12 @@ export default function Analyze() {
               )}
               <div className="mt-8 space-y-3">
                 <p>
-                  Fake probability:{" "}
+                  Fake-category model score:{" "}
                   {(result.fake_probability * 100).toFixed(2)}%
                 </p>
 
                 <p>
-                  Real probability:{" "}
+                  Real-category model score:{" "}
                   {(result.real_probability * 100).toFixed(2)}%
                 </p>
 
@@ -240,10 +241,11 @@ export default function Analyze() {
                 </p>
               </div>
 
-              <p className="mt-6 text-sm text-amber-200">
-                This prediction supports forensic triage.
-                It is not proof that an image was manipulated.
-              </p>
+              <div className="mt-6 rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-4">
+                <h4 className="font-semibold text-cyan-200">Why NeuralEdge AI reached this result</h4>
+                <p className="mt-2 text-sm leading-6 text-slate-100">{resultInPlainLanguage(result)}</p>
+                <p className="mt-2 text-xs text-slate-400">This is a NeuralEdge AI screening result. Check the original source and other evidence before drawing a conclusion.</p>
+              </div>
             </div>
 
             <div className="rounded-3xl border border-white/10 bg-white/5 p-8">
